@@ -1,0 +1,32 @@
+{
+  "rtk": {
+    "repository": "https://github.com/rtk-ai/rtk.git",
+    "tag": "v0.48.0",
+    "commit": "fde0a8f185945556f51718de0f4c430bb62b3df6",
+    "binary_url": "https://github.com/rtk-ai/rtk/releases/download/v0.48.0/rtk-x86_64-unknown-linux-musl.tar.gz",
+    "archive_sha256": "e4e650fa1677c0de2f6839a6040d7b17f312d32f163c402b75af70e9e5af1a91",
+    "binary_sha256": "64c01578fec180a1b1f093e882bc8a673f0a3bf7ecf7094950fec6d897872e01"
+  },
+  "headroom": {
+    "repository": "https://github.com/headroomlabs-ai/headroom.git",
+    "tag": "v0.37.0",
+    "commit": "32d7ca4577d599b8a5f811ada74cf31504302c9d",
+    "distribution": "headroom-ai==0.37.0",
+    "integration": "local library; kompress disabled; no API proxy"
+  },
+  "chat": {
+    "distribution": "prompt-toolkit==3.0.53"
+  },
+  "native_transport": {
+    "distribution": "websockets==15.0.1"
+  },
+  "beads": {
+    "repository": "https://github.com/gastownhall/beads.git",
+    "tag": "v1.2.2",
+    "commit": "6c124203e771433a3550c348771a5b5e27fd3c21",
+    "binary_url": "https://github.com/gastownhall/beads/releases/download/v1.2.2/beads_1.2.2_linux_amd64.tar.gz",
+    "archive_sha256": "8140098a51d3b81d5548d1c5e6db1a2d9930e5d141efe2a4bff7d079c4d321e8",
+    "binary_sha256": "54fc0e0581ce4c5487a5b242f0a4f34af1ef09cf056e164a1af63a6ec7aa1e0e",
+    "integration": "bd CLI through TinkerTom MCP; embedded Dolt; local operations with --sandbox"
+  }
+}

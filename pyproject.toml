@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tinkertom"
+version = "0.1.0"
+description = "Durable, token-conscious task supervision for Codex and Claude Code"
+requires-python = ">=3.11"
+dependencies = ["websockets==15.0.1"]
+
+[project.optional-dependencies]
+suite = ["headroom-ai==0.37.0", "prompt-toolkit>=3,<4"]
+
+[project.scripts]
+tinkertom = "tinkertom.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["tinkertom*"]

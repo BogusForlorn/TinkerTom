@@ -1,0 +1,21 @@
+[Unit]
+Description=TinkerTom persistent coding task
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace these absolute paths and TASK_ID before installing this unit.
+WorkingDirectory=/absolute/path/project
+Environment=PATH=/absolute/path/TinkerTom/.venv/bin:/home/your-user/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/absolute/path/TinkerTom/.venv/bin/tinkertom -C /absolute/path/project resume TASK_ID
+Restart=on-failure
+RestartSec=10
+# Completed=0, blocked=2, paused=3. Do not retry deliberate stops/blockers.
+RestartPreventExitStatus=2 3
+KillMode=control-group
+TimeoutStopSec=15
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,23 @@
+# Defaults for this project, matching the requested YOLO operation.
+provider = "codex"
+permissions = "yolo"
+cooldown_seconds = 18000
+reset_buffer_seconds = 30
+max_turns = 0
+max_failures = 5
+max_stalls = 5
+turn_timeout_seconds = 3600
+max_context_turns = 0
+rtk = true
+headroom = true
+claude_hook = true
+beads = true
+delegate_coding = true
+rubber_duck = true
+codex_worker_model = "gpt-5.6-luna"
+claude_worker_model = "sonnet"
+codex_duck_model = "gpt-5.6-sol"
+claude_duck_model = "claude-opus-4-6"
+agent_timeout_seconds = 900
+worker_max_turns = 8
+verify = ["python3 -m unittest discover -s tests -v"]
