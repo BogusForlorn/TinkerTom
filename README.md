@@ -5,7 +5,7 @@ Launch **Codex CLI or Claude Code's own terminal UI** with local token-reduction
 ## Quick start
 
 ```sh
-source /root/TinkerTom/shell/tinkertom.zsh  # once in an already-open shell
+source ~/.zshrc          # once after setup in an already-open zsh
 cd /path/to/project
 tinkertom codex          # actual Codex UI; enter prompts and /commands there
 TinkerTom claude         # actual Claude Code UI
@@ -17,7 +17,7 @@ tinkertom native-status
 tinkertom doctor
 ```
 
-`~/.zshrc` already sources the shell integration in this environment. Native mode defaults to the requested YOLO permissions unless the project explicitly configures `permissions`; `--tt-standard` uses provider permission prompts. Arguments after the provider go to that provider. There is no `Task for codex:` prompt or TinkerTom chat screen in native mode.
+`setup.sh` configures the shell integration in your local `~/.zshrc` or `~/.bashrc`. Native mode defaults to the requested YOLO permissions unless the project explicitly configures `permissions`; `--tt-standard` uses provider permission prompts. Arguments after the provider go to that provider. There is no `Task for codex:` prompt or TinkerTom chat screen in native mode.
 
 For root-mode Claude, TinkerTom supplies the requested `IS_SANDBOX=1` together with `--dangerously-skip-permissions`, including on automatic retries. The variable is scoped to Claude's process environment; it does not create an OS sandbox. `--tt-standard` selects normal provider permissions.
 
@@ -54,13 +54,30 @@ tinkertom send TASK_ID "Also update the documentation"
 ## Installation
 
 ```sh
-cd /root/TinkerTom
-python3 -m venv .venv
-.venv/bin/python -m pip install -e .
-.venv/bin/python scripts/install-tools.py
-source .venv/bin/activate
+cd /path/to/TinkerTom
+./setup.sh
+source ~/.zshrc                    # bash: source ~/.bashrc
 tinkertom doctor
 ```
+
+Python 3.11+ and Git are required. You do not need to activate the venv for later use: the installer writes launchers bound to the Python that installed them.
+
+For an explicit installation without a venv:
+
+```sh
+cd /path/to/TinkerTom
+./setup.sh --system
+source ~/.zshrc                    # or open a new terminal
+tinkertom doctor
+```
+
+`--system` passes `--break-system-packages` to pip for the selected Python and installs TinkerTom plus its Python dependencies. It requires pip with that option and permission to install packages; choose a writable Python or run with the necessary privileges. Run it outside any activated venv. It can change packages used by other programs. RTK, Beads and source clones still live in the checkout's `.tools/` directory. Keep the checkout: the Python package is installed in editable mode. The installer doesn't install the provider CLIs or transfer logins.
+
+Setup detects zsh or bash from `SHELL`, then adds or updates one managed block in the corresponding startup file while preserving other settings. It enables `tinkertom claude`, `tinkertom codex`, `TinkerTom`, `tinkertom-claude` and `tinkertom-codex` from your current project directory. The sourced file derives its install path from its own location and supports both installation modes. Re-running setup does not duplicate its managed block. New terminals load the commands automatically; setup cannot change the environment of an already-open parent shell, so source its startup file once or open a new terminal.
+
+Use `./setup.sh --python /path/to/python3.13` to select an interpreter, or `--no-shell` to leave shell startup files unchanged. Unsupported shells also leave startup files unchanged; add the checkout's `.tools/bin` to PATH manually. The lower-level `.venv/bin/python scripts/install-tools.py` and `python3 scripts/install-tools.py --system` remain available. They leave shell files unchanged unless passed `--shell zsh` or `--shell bash`.
+
+The pinned automatic binary installation currently targets Linux x86_64 (including x86_64 WSL2). Other platforms require Rust/Cargo for RTK and a platform-compatible Beads executable at `.tools/bin/bd`; changing Python installation mode does not change platform support.
 
 Install and sign into the provider CLI you intend to use, using the official [Codex documentation](https://developers.openai.com/codex/cli/) or [Claude Code setup guide](https://code.claude.com/docs/en/setup). The runner inherits the CLI's existing authentication, model defaults, configuration, MCP servers and relevant repository instructions. Your configured credentials determine subscription versus API billing; the wrapper does not switch billing modes.
 

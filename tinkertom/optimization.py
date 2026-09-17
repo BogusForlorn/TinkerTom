@@ -5,13 +5,14 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 SUITE_ROOT = Path(__file__).resolve().parent.parent
 
 
 def suite_environment() -> dict:
     env = dict(os.environ)
-    env["PATH"] = os.pathsep.join([str(SUITE_ROOT / ".tools/bin"), str(SUITE_ROOT / ".venv/bin"), env.get("PATH", "")])
+    env["PATH"] = os.pathsep.join([str(SUITE_ROOT / ".tools/bin"), str(Path(sys.executable).parent), env.get("PATH", "")])
     env.update(RTK_TELEMETRY_DISABLED="1", HEADROOM_TELEMETRY_DISABLED="1", DO_NOT_TRACK="1",
                HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", LITELLM_LOCAL_MODEL_COST_MAP="True")
     env["TIKTOKEN_CACHE_DIR"] = str(SUITE_ROOT / ".tools/tokenizer-cache")
