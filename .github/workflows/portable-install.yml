@@ -1,0 +1,42 @@
+name: Portable installation
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-26, macos-26-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install suite through public setup entry point
+        run: ./setup.sh --no-shell
+      - name: Check native binaries and embedded Beads database
+        shell: bash
+        run: |
+          .tools/bin/tinkertom --version
+          .tools/bin/rtk --version
+          .tools/bin/bd --version
+          .tools/bin/headroom --help
+          suite_root="$PWD"
+          project=$(mktemp -d)
+          cd "$project"
+          git init
+          git config user.email fixture@example.invalid
+          git config user.name 'Installation fixture'
+          "$suite_root/.tools/bin/bd" init --quiet --skip-hooks --skip-agents
+          "$suite_root/.tools/bin/bd" --sandbox ready --json
+      - name: Run regression tests
+        run: .venv/bin/python -m unittest discover -s tests -q
