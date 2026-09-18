@@ -33,7 +33,7 @@ These are MCP tools used by the model, not new provider slash commands. Native `
 
 ## Persistent tasks and memory
 
-[Beads](https://github.com/gastownhall/beads) **v1.2.2** is cloned under `.tools/src/beads`; its checksum-verified release executable is `.tools/bin/bd`. Source commit and download hashes are pinned in `tools.lock.json`. `scripts/install-tools.py` reproduces installation on Linux x86_64. This release uses an embedded Dolt database; no separate server is started.
+[Beads](https://github.com/gastownhall/beads) **v1.2.2** is cloned under `.tools/src/beads`; its executable is `.tools/bin/bd`. Source commit and per-platform download hashes are pinned in `tools.lock.json`. `setup.sh` selects checksum-verified releases for Linux ARM64/x86_64 and macOS ARM64/Intel. The macOS binaries target macOS 26; older macOS builds the same pinned source with CGO and `gms_pure_go` enabled, then caches a receipt containing the source commit, platform, macOS version and built binary hash. This preserves the embedded Dolt database; no separate server is started. See the [installation instructions](../README.md#installation) for prerequisites.
 
 The first `beads` tool call initializes `.beads` in the current workspace with `--stealth`, keeping Beads files locally excluded from Git and preventing its bootstrap commit. It skips provider instructions and Git/provider hook installation, and wrapper calls use `--sandbox` to disable automatic remote pushes. Calls are serialized because the embedded store permits one writer at a time. Direct `bd` commands bypass the wrapper's lock; avoid running them concurrently with an agent's Beads call. This local task store is not automatically backed up or shared with a Git remote.
 

@@ -78,20 +78,53 @@ def stop_child(proc):
             proc.wait()
 
 
+def codex_start_permissions(config, extra):
+    """Apply the wrapper's new-thread default unless the user selects a policy."""
+    if config.permissions != "yolo":
+        return None
+    for index, arg in enumerate(extra):
+        if arg == "--":
+            break
+        option = arg.split("=", 1)[0]
+        if option in {"--sandbox", "--ask-for-approval", "--approve-for-me", "--full-auto",
+                      "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--profile", "--permissions"}:
+            return None
+        if arg.startswith(("-s", "-a", "-p")) and not arg.startswith("--"):
+            return None
+        value = None
+        if arg in {"-c", "--config"} and index + 1 < len(extra):
+            value = extra[index + 1]
+        elif arg.startswith("--config="):
+            value = arg.split("=", 1)[1]
+        elif arg.startswith("-c") and arg != "-c":
+            value = arg[2:]
+        if value:
+            key = value.split("=", 1)[0].strip().strip('"')
+            if key in {"approval_policy", "sandbox_mode", "permissions"} or key.startswith(("permissions.", "sandbox_workspace_write.")):
+                return None
+    return {"approvalPolicy": "never", "sandbox": "danger-full-access"}
+
+
 async def codex_ui(executable, extra, workspace, config, env, state, lease_fd):
     from websockets.asyncio.server import unix_serve
     settings = codex_settings(workspace)
+    if config.permissions == "yolo":
+        # The remote TUI rejects permission override flags when resuming a
+        # thread (including /resume inside an initially fresh UI). Configure
+        # our private app-server instead; leave its policy checks in force.
+        settings += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"']
     saved = state.read()
     if not extra and saved.get("status") in {"waiting", "resuming"} and saved.get("session_id"):
         extra = ["resume", saved["session_id"]]
-    flags = ["--dangerously-bypass-approvals-and-sandbox"] if config.permissions == "yolo" else []
+    flags = []
     if config.model:
         flags += ["--model", config.model]
     # Short private socket path avoids AF_UNIX limits in deeply nested projects.
     with tempfile.TemporaryDirectory(prefix="tt-") as runtime:
         socket_path = str(Path(runtime) / "codex.sock")
         upstream = str(Path(runtime) / "backend.sock")
-        bridge = CodexBridge(upstream, workspace, env, state, config, lease_fd)
+        bridge = CodexBridge(upstream, workspace, env, state, config, lease_fd,
+                             start_permissions=codex_start_permissions(config, extra))
         with (state.directory / "app-server.log").open("ab") as log:
             backend = await asyncio.create_subprocess_exec(executable, *settings, "app-server", "--listen", "unix://" + upstream,
                 cwd=workspace, env=env, stdout=log, stderr=log, start_new_session=True, pass_fds=(lease_fd,))

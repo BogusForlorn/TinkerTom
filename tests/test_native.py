@@ -11,12 +11,13 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from tinkertom.cli import main
 from tinkertom.codex_proxy import CodexBridge, exhausted_windows
 from tinkertom.config import Config
 from tinkertom.mcp import response
-from tinkertom.native import claude_settings
+from tinkertom.native import claude_settings, codex_ui, codex_start_permissions
 from tinkertom.native_hooks import handle
 from tinkertom.native_state import NativeState, schedule
 from tinkertom.optimization import suite_environment
@@ -42,6 +43,32 @@ class NativeTests(unittest.TestCase):
                 run.assert_called_with(self.workspace, provider, ['--model', 'example', 'resume', '--last'])
             self.assertEqual(main(['-C', str(self.workspace)]), 0)
             run.assert_called_with(self.workspace, 'codex', [])
+
+    def test_new_thread_policy_keeps_user_overrides_and_resumed_permissions(self):
+        config = Config(permissions='yolo').validate()
+        policy = codex_start_permissions(config, ['--model', 'chosen'])
+        self.assertEqual(policy, {'approvalPolicy': 'never', 'sandbox': 'danger-full-access'})
+        # Wrapper flags are removed before this function; the effective
+        # config, not a forwarded CLI argument, expresses standard mode.
+        self.assertIsNone(codex_start_permissions(Config().validate(), []))
+        for args in (['--sandbox', 'read-only'], ['-sworkspace-write'], ['--ask-for-approval=on-request'],
+                     ['--approve-for-me'], ['--profile', 'work'], ['-c', 'sandbox_mode="read-only"'],
+                     ['--config=approval_policy="on-request"'], ['-cpermissions.default="readonly"']):
+            self.assertIsNone(codex_start_permissions(config, args), args)
+        bridge = CodexBridge([], self.workspace, {}, self.state, config, start_permissions=policy)
+        start = {'id': 100, 'method': 'thread/start', 'params': {
+            'approvalPolicy': 'on-request', 'sandbox': 'workspace-write', 'permissions': None, 'model': 'chosen'}}
+        bridge.incoming(start)
+        self.assertEqual(start['params']['sandbox'], 'danger-full-access')
+        self.assertEqual(start['params']['approvalPolicy'], 'never')
+        self.assertEqual(start['params']['model'], 'chosen')
+        self.assertNotIn('permissions', start['params'])
+        for method in ('thread/resume', 'thread/fork', 'turn/start'):
+            message = {'id': 101, 'method': method, 'params': {
+                'threadId': 'other', 'approvalPolicy': 'on-request', 'sandbox': 'read-only'}}
+            bridge.incoming(message)
+            self.assertEqual(message['params']['approvalPolicy'], 'on-request')
+            self.assertEqual(message['params']['sandbox'], 'read-only')
 
     def test_structured_rate_failure_waits_and_queues_without_claiming(self):
         with patch('tinkertom.codex_proxy.time.time', return_value=1000):
@@ -175,6 +202,45 @@ class NativeTests(unittest.TestCase):
         result = response({'id': 3, 'method': 'tools/call', 'params': {'name': 'run', 'arguments': {'command': 'printf failure; exit 7'}}}, self.workspace)
         self.assertTrue(result['result']['isError'])
         self.assertIn('exit_code: 7', result['result']['content'][0]['text'])
+
+
+class CodexLaunchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_permissions_are_server_config_for_fresh_explicit_and_automatic_resume(self):
+        for permissions in ('yolo', 'standard'):
+            for mode in ('fresh', 'resume', 'saved_wait'):
+                with self.subTest(permissions=permissions, mode=mode), tempfile.TemporaryDirectory() as d:
+                    workspace = Path(d)
+                    state = NativeState(workspace / '.tinkertom/native/codex')
+                    config = Config(permissions=permissions, model='chosen-model').validate()
+                    if mode == 'saved_wait':
+                        with state.edit() as data:
+                            schedule(data, 'saved-session', {}, config)
+                    saved = state.read()
+                    calls = []
+                    async def server(*argv, **kwargs):
+                        calls.append(argv)
+                        # Only socket readiness is needed: this fixture exercises
+                        # the real launcher without issuing any model requests.
+                        Path(argv[argv.index('--listen') + 1].removeprefix('unix://')).touch()
+                        return SimpleNamespace(returncode=0)
+                    ui = SimpleNamespace(returncode=0, poll=lambda: 0)
+                    extra = ['resume', 'saved-session'] if mode == 'resume' else []
+                    with patch('tinkertom.native.asyncio.create_subprocess_exec', side_effect=server), \
+                            patch('tinkertom.native.subprocess.Popen', return_value=ui) as launch:
+                        result = await codex_ui('codex', extra, workspace, config, {}, state, 0)
+                    self.assertEqual(result, 0)
+                    args = launch.call_args.args[0]
+                    self.assertIn('--remote', args)
+                    self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', args)
+                    self.assertNotIn('--sandbox', args)
+                    self.assertEqual(args[args.index('--model') + 1], 'chosen-model')
+                    if mode != 'fresh':
+                        self.assertEqual(args[-2:], ['resume', 'saved-session'])
+                    server_args = calls[0]
+                    self.assertTrue(any('mcp_servers.tinkertom.command=' in item for item in server_args))
+                    self.assertEqual('approval_policy="never"' in server_args, permissions == 'yolo')
+                    self.assertEqual('sandbox_mode="danger-full-access"' in server_args, permissions == 'yolo')
+                    self.assertEqual(state.read(), saved)
 
 
 class BridgeTransportTests(unittest.IsolatedAsyncioTestCase):

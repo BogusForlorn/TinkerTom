@@ -39,7 +39,7 @@ def exhausted_windows(value, now):
 
 
 class CodexBridge:
-    def __init__(self, upstream, workspace, environment, state, config, lease_fd=None):
+    def __init__(self, upstream, workspace, environment, state, config, lease_fd=None, start_permissions=None):
         self.upstream, self.workspace, self.environment = upstream, workspace, environment
         self.state, self.config, self.lease_fd = state, config, lease_fd
         self.active = None
@@ -50,10 +50,18 @@ class CodexBridge:
         self.busy = False
         self.owner = None
         self.clients = {}
+        self.start_permissions = start_permissions
 
     def incoming(self, message, connection=0):
         """Returns an immediate response only when a turn is queued locally."""
         method, params = message.get("method"), message.get("params") or {}
+        if method == "thread/start" and self.start_permissions:
+            # Remote TUI defaults can mask the private backend defaults. Apply
+            # the requested launch policy only to new threads; resume, forks,
+            # turns and later permission changes retain provider semantics.
+            params.pop("permissions", None)  # Cannot combine named profile and sandbox.
+            params.update(self.start_permissions)
+            message["params"] = params
         if method in {"thread/start", "thread/resume", "thread/fork", "account/rateLimits/read"}:
             self.requests[(connection, message.get("id"))] = method
         if method in {"thread/start", "thread/fork"} or (method == "thread/resume" and params.get("threadId") != self.active):

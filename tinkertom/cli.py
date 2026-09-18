@@ -167,7 +167,7 @@ def doctor(workspace: Path) -> dict:
     checks["compression"] = {"headroom_mode": "local library, no API proxy", "claude_bash_hook": config.claude_hook,
                              "codex": "native MCP tools plus application context; headless prompt-guided tools; no forced interception"}
     checks["native_ui"] = {"commands": ["tinkertom codex", "tinkertom claude"],
-                           "codex": "local app-server bridge; tested with 0.153.4 (experimental protocol)",
+                           "codex": "local app-server bridge; tested with 0.153.4 and 0.154.0; native permissions set on private backend (experimental protocol)",
                            "claude": "requires StopFailure lifecycle hook; local fixture tests only",
                            "mcp": "per-invocation run/read/symbols/wait_status/rubber_duck/code_worker/beads tools",
                            "lifetime": "keep the launcher running; use tmux for native UI detachment"}

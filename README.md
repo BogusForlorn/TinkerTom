@@ -60,7 +60,7 @@ source ~/.zshrc                    # bash: source ~/.bashrc
 tinkertom doctor
 ```
 
-Python 3.11+ and Git are required. You do not need to activate the venv for later use: the installer writes launchers bound to the Python that installed them.
+Python 3.11+ and Git are required. Setup finds a compatible installed Python; on macOS, if none is found and Homebrew is installed, it installs Python 3.13 through Homebrew. Otherwise it prints the missing prerequisite. You do not need to activate the venv for later use: the installer writes launchers bound to the Python that installed them.
 
 For an explicit installation without a venv:
 
@@ -77,7 +77,22 @@ Setup detects zsh or bash from `SHELL`, then adds or updates one managed block i
 
 Use `./setup.sh --python /path/to/python3.13` to select an interpreter, or `--no-shell` to leave shell startup files unchanged. Unsupported shells also leave startup files unchanged; add the checkout's `.tools/bin` to PATH manually. The lower-level `.venv/bin/python scripts/install-tools.py` and `python3 scripts/install-tools.py --system` remain available. They leave shell files unchanged unless passed `--shell zsh` or `--shell bash`.
 
-The pinned automatic binary installation currently targets Linux x86_64 (including x86_64 WSL2). Other platforms require Rust/Cargo for RTK and a platform-compatible Beads executable at `.tools/bin/bd`; changing Python installation mode does not change platform support.
+`setup.sh` checks `uname -s` and `uname -m`, normalizes `arm64`/`aarch64`, and selects pinned RTK and Beads binaries for **macOS ARM64 (Apple Silicon, including M4), macOS Intel, Linux ARM64, or Linux x86_64/WSL2**. Both archive and executable SHA-256 hashes are verified before replacing an installed tool. Headroom's wheel is selected by pip for the chosen Python and architecture. Native Windows and other architectures are rejected before installation.
+
+**macOS:** the pinned Beads 1.2.2 release binaries require macOS 26. On older macOS, setup instead builds the pinned source with embedded Dolt support using Apple Command Line Tools and Go, and caches the resulting binary. If Go is missing, setup installs it through an existing Homebrew installation. Without Homebrew, install Go 1.26.2+ yourself. If the Apple tools are missing, run `xcode-select --install` and rerun setup after they finish. RTK still uses its prebuilt binary; Rust is not required. macOS 26+ uses prebuilt binaries for both tools.
+
+On your Mac, after cloning and installing/authenticating your provider CLI:
+
+```sh
+cd TinkerTom
+./setup.sh
+source ~/.zshrc
+tinkertom doctor
+cd /path/to/your/project
+tinkertom-codex                    # or tinkertom-claude
+```
+
+Use a native ARM64 terminal on Apple Silicon; a Rosetta shell reporting `x86_64` selects Intel tools. Clone and rerun setup on each machine rather than copying `.venv` or `.tools` between operating systems. The portability workflow covers Linux ARM64/x86_64 and macOS ARM64/Intel, including the older-macOS Beads build path. Local platform-selection tests and macOS artifact checks run on Linux; an actual Mac run is needed to validate native execution. The machine must stay awake and the launcher must stay running for automatic continuation.
 
 Install and sign into the provider CLI you intend to use, using the official [Codex documentation](https://developers.openai.com/codex/cli/) or [Claude Code setup guide](https://code.claude.com/docs/en/setup). The runner inherits the CLI's existing authentication, model defaults, configuration, MCP servers and relevant repository instructions. Your configured credentials determine subscription versus API billing; the wrapper does not switch billing modes.
 
@@ -188,7 +203,7 @@ A provider change preserves the objective, files, checkpoint and last report, ar
 
 ## Permissions
 
-`permissions = "yolo"` passes Codex's sandbox/approval bypass or Claude's permission bypass. This allows broad filesystem and shell access. Use a dedicated account/container or worktree appropriate for the task. Provider and organization policies can still deny operations.
+`permissions = "yolo"` configures native Codex's private app-server and new-thread requests for full filesystem access without approval prompts. Headless Codex and Claude use their CLI permission-bypass flags. Native Codex's remote UI receives no injected permission override flag, allowing saved sessions to resume on CLI 0.154.0. This allows broad filesystem and shell access. Use a dedicated account/container or worktree appropriate for the task. Provider and organization policies can still deny operations.
 
 In headless mode, `standard` runs Codex with `workspace-write` and approvals disabled, so operations outside its permissions fail. Claude uses `dontAsk` with Read/Edit/Write/Glob/Grep/Bash allowed; **that Bash allowance is not a filesystem sandbox**. CLI restrictions on root execution or managed environments still apply. Acceptance commands execute as your OS user in both modes.
 
