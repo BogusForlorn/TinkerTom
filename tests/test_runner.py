@@ -164,7 +164,8 @@ class RunnerTests(unittest.TestCase):
         (self.store.workspace / "tinkertom.toml").write_text("cooldown_second = 4\n")
         with self.assertRaises(ValueError):
             load_config(self.store.workspace)
-        for args in ({"max_stalls": 0}, {"cooldown_seconds": float("nan")}, {"max_turns": True}, {"verify": "pytest"}):
+        for args in ({"max_stalls": 0}, {"cooldown_seconds": float("nan")}, {"max_turns": True},
+                     {"verify": "pytest"}, {"rubber_duck_profile": "friendly"}):
             with self.assertRaises(ValueError):
                 Config(**args).validate()
 

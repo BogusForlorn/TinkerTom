@@ -14,8 +14,8 @@ The per-invocation TinkerTom MCP server exposes `code_worker`, `rubber_duck` and
 
 | Main UI | Coordinator/reviewer | Implementation worker | Rubber duck |
 | --- | --- | --- | --- |
-| Codex | Your selected native model, such as GPT-6 Astra | Codex CLI `gpt-5.6-luna`, medium reasoning | Claude Code `claude-opus-4-6`, high effort |
-| Claude Code | Your selected native model, such as Opus | Claude Code `sonnet`, medium effort | Codex CLI `gpt-5.6-sol`, high reasoning |
+| Codex | Your selected native model, such as GPT-6 Astra | Codex CLI `gpt-5.6-luna`, medium reasoning | Configured Claude model, high effort |
+| Claude Code | Your selected native model, such as Opus | Claude Code `sonnet`, medium effort | Configured Codex model, high reasoning |
 
 The coordinator receives instructions to delegate substantial implementation with explicit file scope, requirements and acceptance checks. It should inspect the worker's diff, run relevant checks independently, and own final acceptance. This is an instructed workflow, not an automatic interception of every edit; trivial edits can remain with the main model. Selecting a smaller main model with `/model` also changes the coordinator: TinkerTom does not override that choice.
 
@@ -69,10 +69,13 @@ Defaults are active in every workspace, with optional per-project overrides in `
 beads = true
 delegate_coding = true
 rubber_duck = true
+rubber_duck_profile = "general"       # or "authorized_security"
 codex_worker_model = "gpt-5.6-luna"
 claude_worker_model = "sonnet"
 codex_duck_model = "gpt-5.6-sol"
-claude_duck_model = "claude-opus-4-6"
+claude_duck_model = "fable"
+codex_security_duck_model = "gpt-5.6-sol"
+claude_security_duck_model = "claude-opus-4-6"
 agent_timeout_seconds = 900
 worker_max_turns = 8
 ```

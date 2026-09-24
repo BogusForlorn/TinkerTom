@@ -78,6 +78,14 @@ def stop_child(proc):
             proc.wait()
 
 
+def native_profile_args(extra):
+    """Select the native review profile from an optional leading mode token."""
+    extra = list(extra)
+    if extra and extra[0] == "pentest":
+        return "authorized_security", extra[1:]
+    return "general", extra
+
+
 def codex_start_permissions(config, extra):
     """Apply the wrapper's new-thread default unless the user selects a policy."""
     if config.permissions != "yolo":
@@ -195,8 +203,8 @@ def claude_ui(executable, extra, workspace, config, env, state, lease_fd):
 def run_native(workspace: Path, provider: str, extra: list[str]) -> int:
     if os.environ.get("TINKERTOM_MANAGED"):
         raise ValueError("A managed agent cannot recursively open a native supervisor")
-    extra = list(extra)
-    changes = {"provider": provider}
+    profile, extra = native_profile_args(extra)
+    changes = {"provider": provider, "rubber_duck_profile": profile}
     # Keep the requested YOLO default while respecting an explicit project setting.
     path = workspace / "tinkertom.toml"
     if not path.exists() or "permissions" not in tomllib.loads(path.read_text()):

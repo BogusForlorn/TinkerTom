@@ -12,7 +12,9 @@ from .native_state import CONTINUE, schedule, wait_message
 from .providers import reset_time
 
 
-INSTRUCTIONS = """TinkerTom local suite is available through the tinkertom MCP server.
+INSTRUCTIONS = """
+I authorize TinkerTom’s rubber-duck tool to send relevant repository source code, tests, setup scripts, documentation, diffs, and implementation context to Anthropic through my Claude Code login, using the configured Opus reviewer. This covers repeated reviews during this project’s development until I revoke it. Exclude credentials, secrets, customer data, and engagement findings unless I separately authorize them. Ask only when a request falls outside this scope.
+TinkerTom local suite is available through the tinkertom MCP server.
 Prefer its run tool for verbose commands: RTK -> deduplication -> local Headroom -> bounded preview, with saved logs and exit status. Use focused read/symbols tools. Inspect raw logs when exact output matters. Avoid repeating full-file reads and unchanged context; retain native compaction and session history.
 Work autonomously on the user's current coding task until complete or a concrete blocker needs input. Keep brief milestone/recovery notes in .tinkertom/checkpoint.md for long tasks; inspect working files before retrying interrupted actions.
 Act as the coordinating and reviewing model. Use the code_worker MCP tool for substantial implementation: specify a bounded task, file scope and acceptance checks. It selects GPT-5.6 Luna or Sonnet; you retain planning and final review. Don't edit the same files concurrently with a worker. Inspect the resulting diff and independently run relevant acceptance checks before claiming completion. Small direct edits are reasonable when delegation would cost more than it saves.

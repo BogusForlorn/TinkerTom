@@ -46,7 +46,7 @@ class HelperTests(unittest.TestCase):
         return [json.loads(x) for x in (self.workspace / 'calls.jsonl').read_text().splitlines()]
 
     def test_opposite_routing_readonly_and_review_cache_tracks_evidence(self):
-        for parent, other, model in [('codex', 'claude', 'claude-opus-4-6'), ('claude', 'codex', 'gpt-5.6-sol')]:
+        for parent, other, model in [('codex', 'claude', 'fable'), ('claude', 'codex', 'gpt-5.6-sol')]:
             with self.subTest(parent=parent), patch.dict(os.environ, TINKERTOM_PROVIDER=parent):
                 self.scenario(['review'])
                 source = self.workspace / 'source.py'
@@ -56,8 +56,13 @@ class HelperTests(unittest.TestCase):
                 result = json.loads(value)
                 self.assertFalse(error)
                 self.assertEqual((result['provider'], result['model']), (other, model))
+                self.assertEqual(result['profile'], 'general')
                 self.assertEqual(result['usage']['input_tokens'], 12)
                 call = self.calls()[0]
+                self.assertIn('You have no tools or filesystem access.', call['prompt'])
+                self.assertIn('Do not request or invoke tools.', call['prompt'])
+                self.assertIn('Review only the supplied proposal, context, and snapshots.', call['prompt'])
+                self.assertIn('explicitly identify the missing evidence', call['prompt'])
                 self.assertEqual(call['provider'], other)
                 self.assertNotEqual(call['cwd'], str(self.workspace))
                 self.assertEqual(call['helper'], '1')
@@ -76,6 +81,20 @@ class HelperTests(unittest.TestCase):
                 source.write_text('changed evidence')
                 agent_call('rubber_duck', args, self.workspace)
                 self.assertEqual(len(self.calls()), 2)
+
+    def test_authorized_security_profile_routes_and_persists(self):
+        (self.workspace / 'tinkertom.toml').write_text('rubber_duck_profile="authorized_security"\nreset_buffer_seconds=0\nretry_seconds=0.01\n')
+        for parent, other, model in [('codex', 'claude', 'claude-opus-4-6'), ('claude', 'codex', 'gpt-5.6-sol')]:
+            with self.subTest(parent=parent), patch.dict(os.environ, TINKERTOM_PROVIDER=parent):
+                self.scenario(['review'])
+                value, error = agent_call('rubber_duck', {'proposal': 'Check scope'}, self.workspace)
+                result = json.loads(value)
+                self.assertFalse(error)
+                self.assertEqual((result['provider'], result['profile'], result['model']), (other, 'authorized_security', model))
+                request = json.loads(next((self.workspace / '.tinkertom/agents').glob('*/request.json')).read_text())
+                state = json.loads(next((self.workspace / '.tinkertom/agents').glob('*/state.json')).read_text())
+                self.assertEqual(request['profile'], 'authorized_security')
+                self.assertEqual(state['profile'], 'authorized_security')
 
     def test_smaller_workers_wait_then_resume_same_cli_and_session(self):
         for provider, model in [('codex', 'gpt-5.6-luna'), ('claude', 'sonnet')]:

@@ -37,10 +37,13 @@ claude_hook = true                 # optimize simple Bash tool calls automatical
 beads = true                       # persistent local tasks, dependencies and memory
 delegate_coding = true             # smaller-model CLI implementation workers
 rubber_duck = true                 # opposite-provider CLI review
+rubber_duck_profile = "general"   # general or authorized_security
 codex_worker_model = "gpt-5.6-luna"
 claude_worker_model = "sonnet"
 codex_duck_model = "gpt-5.6-sol"
-claude_duck_model = "claude-opus-4-6"
+claude_duck_model = "fable"
+codex_security_duck_model = "gpt-5.6-sol"
+claude_security_duck_model = "claude-opus-4-6"
 agent_timeout_seconds = 900        # per helper CLI invocation; cooldown excluded
 worker_max_turns = 8               # successful helper turns, not quota retries
 verify = []                        # e.g. ["python -m pytest", "npm run build"]
@@ -161,7 +164,8 @@ def doctor(workspace: Path) -> dict:
                 item["error"] = str(exc)
         checks[name] = item
     checks["platform"] = {"supported": os.name == "posix", "python": sys.version.split()[0]}
-    checks["config"] = {"provider": config.provider, "permissions": config.permissions, "acceptance_commands": config.verify}
+    checks["config"] = {"provider": config.provider, "permissions": config.permissions,
+                         "rubber_duck_profile": config.rubber_duck_profile, "acceptance_commands": config.verify}
     checks["note"] = "Checks binary presence only, not live authentication, quota or model access."
     checks["quota_policy"] = "wait_only: no /usage, quota claims, paid extensions or automatic provider/account switching"
     checks["compression"] = {"headroom_mode": "local library, no API proxy", "claude_bash_hook": config.claude_hook,
@@ -173,7 +177,10 @@ def doctor(workspace: Path) -> dict:
                            "lifetime": "keep the launcher running; use tmux for native UI detachment"}
     checks["agents"] = {"transport": "installed CLI subprocesses using existing CLI authentication",
                         "coding_workers": {"codex": config.codex_worker_model, "claude": config.claude_worker_model},
-                        "rubber_duck": {"from_claude": config.codex_duck_model, "from_codex": config.claude_duck_model},
+                        "rubber_duck": {"profile": config.rubber_duck_profile,
+                                        "general": {"from_claude": config.codex_duck_model, "from_codex": config.claude_duck_model},
+                                        "authorized_security": {"from_claude": config.codex_security_duck_model,
+                                                                  "from_codex": config.claude_security_duck_model}},
                         "enabled": {"workers": config.delegate_coding, "rubber_duck": config.rubber_duck, "beads": config.beads},
                         "coordinator": "your selected native-session model; reviews worker edits and acceptance checks"}
     return checks

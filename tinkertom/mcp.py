@@ -24,7 +24,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"], "additionalProperties": False}},
     {"name": "wait_status", "description": "Read the local wrapper's saved cooldown. Does not contact providers, query /usage, claim resets or change billing.",
      "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "rubber_duck", "description": "Challenge a proposal with the opposite provider's CLI: Claude sessions use Codex GPT-5.6 Sol; Codex sessions use Claude Opus 4.6. Supply a concise rationale and relevant evidence, not hidden chain-of-thought. Read-only critique; identical supplied evidence is cached. The call waits through normal quota resets and is cancellable.",
+    {"name": "rubber_duck", "description": "Challenge a proposal with the configured opposite-provider CLI model selected by the project review profile. Supply a concise rationale and relevant evidence, not hidden chain-of-thought. Read-only critique; identical supplied evidence is cached. The call waits through normal quota resets and is cancellable.",
      "inputSchema": {"type": "object", "properties": {"proposal": {"type": "string", "maxLength": 32000},
          "context": {"type": "string", "maxLength": 24000}, "files": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
          "force": {"type": "boolean", "default": False}}, "required": ["proposal"], "additionalProperties": False}},
@@ -84,7 +84,7 @@ def call(name: str, args: dict, workspace: Path) -> tuple[str, bool]:
                             "queued_items": len(data.get("pending_input", [])) + len(data.get("pending_prompts", []))})
         for path in sorted((workspace / ".tinkertom/agents").glob("*/state.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
             data = json.loads(path.read_text())
-            records.append({"helper": path.parent.name, **{key: data.get(key) for key in ("provider", "model", "status", "next_run_at")}})
+            records.append({"helper": path.parent.name, **{key: data.get(key) for key in ("provider", "profile", "model", "status", "next_run_at")}})
         return json.dumps(records), False
     raise ValueError(f"Unknown tool: {name}")
 

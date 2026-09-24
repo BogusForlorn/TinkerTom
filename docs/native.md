@@ -6,7 +6,7 @@ tinkertom codex
 TinkerTom claude
 ```
 
-Both spellings reach the same Python entry point. With no provider, Codex is selected. Enter prompts directly in the actual provider interface. Native slash commands, menus, history, model selection, MCP connections and repository instructions remain provider features. The wrapper doesn't implement a replacement chat or intercept keyboard input.
+Both spellings reach the same Python entry point. With no provider, Codex is selected. Plain native launches use the `general` rubber-duck profile; use `tinkertom codex pentest` or `tinkertom claude pentest` for the `authorized_security` profile. The exact leading mode token is consumed, while every later provider argument is preserved. To pass a literal leading provider argument or prompt named `pentest`, use the provider separator: `tinkertom codex -- pentest`. Enter prompts directly in the actual provider interface. Native slash commands, menus, history, model selection, MCP connections and repository instructions remain provider features. The wrapper doesn't implement a replacement chat or intercept keyboard input.
 
 ## Local tools
 
@@ -18,7 +18,7 @@ Each invocation adds an MCP server named `tinkertom`:
 | `read` | Read a focused line range or Python definition. |
 | `symbols` | Find Python definitions before reading their bodies. |
 | `wait_status` | Read the local wait deadline and queue count without a provider request. |
-| `rubber_duck` | Opposite-provider CLI critique: GPT-5.6 Sol or Claude Opus 4.6. |
+| `rubber_duck` | Opposite-provider CLI critique using the configured model selected by the project review profile. |
 | `code_worker` | Bounded implementation using GPT-5.6 Luna or Sonnet; coordinator reviews the changes. |
 | `beads` | Persistent local tasks, dependencies and memory. |
 
@@ -80,7 +80,7 @@ The saved conversation and main-session cooldown survive this move; an in-flight
 
 ## Configuration and verification
 
-Provider arguments pass through, for example `tinkertom codex --model MODEL`, `tinkertom codex resume SESSION_ID`, or `tinkertom claude --resume SESSION_ID`. TinkerTom reserves `--tt-standard` for normal provider permissions and `--tt-executable PATH` for selecting a CLI binary. It uses the current directory; put `-C DIR` before the provider to override it. Custom remote Codex endpoints are not supported because the bridge needs its local backend.
+Provider arguments pass through, for example `tinkertom codex --model MODEL`, `tinkertom codex resume SESSION_ID`, or `tinkertom claude --resume SESSION_ID`. TinkerTom reserves `--tt-standard` for normal provider permissions and `--tt-executable PATH` for selecting a CLI binary. The selected native profile is written to the session config snapshot used by MCP rubber-duck calls; headless `start`/`chat` tasks continue to use their project TOML profile. It uses the current directory; put `-C DIR` before the provider to override it. Custom remote Codex endpoints are not supported because the bridge needs its local backend.
 
 The requested default is YOLO unless the project's TOML explicitly sets permissions. For Claude running as root in YOLO mode, TinkerTom sets `IS_SANDBOX=1` in the child environment and passes `--dangerously-skip-permissions`. Automatic retries preserve both settings. The same launch environment is used by headless Claude tasks. The variable tells Claude to treat the environment as sandboxed; it does not create filesystem or network isolation, and isn't exported globally or added to Codex launches. Native standard mode retains the provider's normal permission UI; MCP `run` executes as the local OS user rather than inside the provider's shell sandbox.
 

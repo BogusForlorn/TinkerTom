@@ -9,6 +9,8 @@ source ~/.zshrc          # once after setup in an already-open zsh
 cd /path/to/project
 tinkertom codex          # actual Codex UI; enter prompts and /commands there
 TinkerTom claude         # actual Claude Code UI
+tinkertom codex pentest  # authorized-security rubber-duck profile
+tinkertom claude pentest # same profile with Claude as the native UI
 tinkertom               # defaults to Codex
 tinkertom codex --model MODEL
 tinkertom codex resume SESSION_ID
@@ -17,7 +19,7 @@ tinkertom native-status
 tinkertom doctor
 ```
 
-`setup.sh` configures the shell integration in your local `~/.zshrc` or `~/.bashrc`. Native mode defaults to the requested YOLO permissions unless the project explicitly configures `permissions`; `--tt-standard` uses provider permission prompts. Arguments after the provider go to that provider. There is no `Task for codex:` prompt or TinkerTom chat screen in native mode.
+`setup.sh` configures the shell integration in your local `~/.zshrc` or `~/.bashrc`. Native mode defaults to the requested YOLO permissions unless the project explicitly configures `permissions`; `--tt-standard` uses provider permission prompts. A plain native launch selects the `general` rubber-duck profile; add the exact leading `pentest` token for `authorized_security`. That mode token is consumed by TinkerTom. To pass a literal provider argument or prompt beginning with `pentest`, use the provider separator, for example `tinkertom codex -- pentest`. All following provider arguments pass through unchanged. There is no `Task for codex:` prompt or TinkerTom chat screen in native mode.
 
 For root-mode Claude, TinkerTom supplies the requested `IS_SANDBOX=1` together with `--dangerously-skip-permissions`, including on automatic retries. The variable is scoped to Claude's process environment; it does not create an OS sandbox. `--tt-standard` selects normal provider permissions.
 
@@ -25,8 +27,8 @@ The native UI loads a local **TinkerTom MCP server** with RTK/Headroom command c
 
 | Main UI | Coding worker | Rubber duck |
 | --- | --- | --- |
-| `tinkertom codex` | Codex GPT-5.6 Luna | Claude Code Opus 4.6 |
-| `tinkertom claude` | Claude Code Sonnet | Codex GPT-5.6 Sol |
+| `tinkertom codex` | Codex GPT-5.6 Luna | configured Claude reviewer |
+| `tinkertom claude` | Claude Code Sonnet | configured Codex reviewer |
 
 Your chosen main model coordinates and reviews. Helpers use the installed CLIs and existing login sessions. Beads stores tasks, dependencies and durable discoveries locally. See [workflow, configuration and cost controls](docs/agents.md). Restart an already-running launcher to load the updated bridge and tool list.
 

@@ -26,10 +26,13 @@ class Config:
     beads: bool = True
     delegate_coding: bool = True
     rubber_duck: bool = True
+    rubber_duck_profile: str = "general"
     codex_worker_model: str = "gpt-5.6-luna"
     claude_worker_model: str = "sonnet"
     codex_duck_model: str = "gpt-5.6-sol"
-    claude_duck_model: str = "claude-opus-4-6"
+    claude_duck_model: str = "fable"
+    codex_security_duck_model: str = "gpt-5.6-sol"
+    claude_security_duck_model: str = "claude-opus-4-6"
     agent_timeout_seconds: float = 900
     worker_max_turns: int = 8
     verify: list[str] | None = None
@@ -39,6 +42,8 @@ class Config:
             raise ValueError("provider must be codex or claude")
         if self.permissions not in {"standard", "yolo"}:
             raise ValueError("permissions must be standard or yolo")
+        if self.rubber_duck_profile not in {"general", "authorized_security"}:
+            raise ValueError("rubber_duck_profile must be general or authorized_security")
         for name in ("cooldown_seconds", "retry_seconds", "turn_timeout_seconds", "verify_timeout_seconds", "agent_timeout_seconds"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
@@ -55,7 +60,8 @@ class Config:
             raise ValueError("model/executable must be strings")
         if any(type(getattr(self, name)) is not bool for name in ("rtk", "headroom", "claude_hook", "beads", "delegate_coding", "rubber_duck")):
             raise ValueError("Optimizer and orchestration switches must be booleans")
-        for name in ("codex_worker_model", "claude_worker_model", "codex_duck_model", "claude_duck_model"):
+        for name in ("codex_worker_model", "claude_worker_model", "codex_duck_model", "claude_duck_model",
+                     "codex_security_duck_model", "claude_security_duck_model"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"{name} must be a model name")
         if type(self.worker_max_turns) is not int or not 1 <= self.worker_max_turns <= 100:

@@ -10,14 +10,14 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
 
 from tinkertom.cli import main
 from tinkertom.codex_proxy import CodexBridge, exhausted_windows
 from tinkertom.config import Config
 from tinkertom.mcp import response
-from tinkertom.native import claude_settings, codex_ui, codex_start_permissions
+from tinkertom.native import claude_settings, codex_ui, codex_start_permissions, native_profile_args, run_native
 from tinkertom.native_hooks import handle
 from tinkertom.native_state import NativeState, schedule
 from tinkertom.optimization import suite_environment
@@ -41,8 +41,52 @@ class NativeTests(unittest.TestCase):
             for provider in ('codex', 'claude'):
                 self.assertEqual(main(['-C', str(self.workspace), provider, '--model', 'example', 'resume', '--last']), 0)
                 run.assert_called_with(self.workspace, provider, ['--model', 'example', 'resume', '--last'])
+                self.assertEqual(main(['-C', str(self.workspace), provider, '--', 'pentest', '--model', 'example']), 0)
+                run.assert_called_with(self.workspace, provider, ['--', 'pentest', '--model', 'example'])
             self.assertEqual(main(['-C', str(self.workspace)]), 0)
             run.assert_called_with(self.workspace, 'codex', [])
+
+    def test_native_profile_modes_strip_only_exact_leading_pentest(self):
+        for provider in ('codex', 'claude'):
+            with self.subTest(provider=provider):
+                self.assertEqual(native_profile_args(['pentest', '--model', 'example', 'resume', 'SESSION']),
+                                 ('authorized_security', ['--model', 'example', 'resume', 'SESSION']))
+                self.assertEqual(native_profile_args(['--', 'pentest', '--model', 'example']),
+                                 ('general', ['--', 'pentest', '--model', 'example']))
+                self.assertEqual(native_profile_args(['Pentest', '--model', 'example']),
+                                 ('general', ['Pentest', '--model', 'example']))
+
+    def test_native_launch_snapshots_profile_and_preserves_provider_args(self):
+        for provider in ('codex', 'claude'):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as d:
+                workspace = Path(d)
+                (workspace / 'tinkertom.toml').write_text('rubber_duck_profile = "authorized_security"\n')
+                with patch('tinkertom.native.shutil.which', return_value='/bin/provider'), \
+                     patch('tinkertom.native.sys.stdin.isatty', return_value=True), \
+                     patch('tinkertom.native.sys.stdout.isatty', return_value=True), \
+                     patch('tinkertom.native.termios.tcgetattr', return_value=[]), \
+                     patch('tinkertom.native.termios.tcsetattr'), \
+                     patch('tinkertom.native.codex_ui', new_callable=AsyncMock) as codex, \
+                     patch('tinkertom.native.claude_ui', return_value=0) as claude:
+                    run_native(workspace, provider, ['--model', 'example'])
+                snapshot = json.loads((workspace / '.tinkertom/native' / provider / 'config.json').read_text())
+                self.assertEqual(snapshot['rubber_duck_profile'], 'general')
+                forwarded = codex.call_args.args[1] if provider == 'codex' else claude.call_args.args[1]
+                self.assertEqual(forwarded, ['--model', 'example'])
+
+                (workspace / 'tinkertom.toml').write_text('rubber_duck_profile = "general"\n')
+                with patch('tinkertom.native.shutil.which', return_value='/bin/provider'), \
+                     patch('tinkertom.native.sys.stdin.isatty', return_value=True), \
+                     patch('tinkertom.native.sys.stdout.isatty', return_value=True), \
+                     patch('tinkertom.native.termios.tcgetattr', return_value=[]), \
+                     patch('tinkertom.native.termios.tcsetattr'), \
+                     patch('tinkertom.native.codex_ui', new_callable=AsyncMock) as codex, \
+                     patch('tinkertom.native.claude_ui', return_value=0) as claude:
+                    run_native(workspace, provider, ['pentest', '--model', 'example', 'resume', 'SESSION'])
+                snapshot = json.loads((workspace / '.tinkertom/native' / provider / 'config.json').read_text())
+                self.assertEqual(snapshot['rubber_duck_profile'], 'authorized_security')
+                forwarded = codex.call_args.args[1] if provider == 'codex' else claude.call_args.args[1]
+                self.assertEqual(forwarded, ['--model', 'example', 'resume', 'SESSION'])
 
     def test_new_thread_policy_keeps_user_overrides_and_resumed_permissions(self):
         config = Config(permissions='yolo').validate()
