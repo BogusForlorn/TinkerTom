@@ -41,9 +41,13 @@ rubber_duck_profile = "general"   # general or authorized_security
 codex_worker_model = "gpt-5.6-luna"
 claude_worker_model = "sonnet"
 codex_duck_model = "gpt-5.6-sol"
-claude_duck_model = "fable"
-codex_security_duck_model = "gpt-5.6-sol"
+claude_duck_model = "opus"
+codex_security_duck_model = "gpt-daybreak-blue-latest"
 claude_security_duck_model = "claude-opus-4-6"
+claude_pentest_model = "claude-opus-4-6"
+copilot_fallback = true
+copilot_fallback_model = "claude-opus-5.5"
+codex_native_model = "gpt-daybreak-blue-latest"
 agent_timeout_seconds = 900        # per helper CLI invocation; cooldown excluded
 worker_max_turns = 8               # successful helper turns, not quota retries
 verify = []                        # e.g. ["python -m pytest", "npm run build"]
@@ -70,7 +74,14 @@ def parser():
     for provider in ("codex", "claude"):
         native = sub.add_parser(provider, add_help=False, help=f"Open the native {provider} UI with the TinkerTom suite")
         native.add_argument("provider_args", nargs=argparse.REMAINDER)
-    sub.add_parser("mcp", help="Serve compression, coding workers, rubber duck and Beads over MCP stdio")
+    mcp = sub.add_parser("mcp", help="Serve compression, coding workers, rubber duck and Beads over MCP stdio")
+    # Private flags are emitted only in provider-generated registrations. They
+    # are intentionally hidden so standalone `tinkertom mcp` remains stable.
+    mcp.add_argument("--__tinkertom-config", dest="bootstrap_config", help=argparse.SUPPRESS)
+    mcp.add_argument("--__tinkertom-provider", dest="bootstrap_provider", help=argparse.SUPPRESS)
+    mcp.add_argument("--__tinkertom-profile", dest="bootstrap_profile", help=argparse.SUPPRESS)
+    mcp.add_argument("--__tinkertom-helper", dest="bootstrap_helper", action="store_true", help=argparse.SUPPRESS)
+    mcp.add_argument("--__tinkertom-managed", dest="bootstrap_managed", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("native-status", help="Show saved native UI cooldowns")
     init = sub.add_parser("init", help="Create project configuration")
     init.add_argument("--permissions", choices=["standard", "yolo"], default="standard")
@@ -165,7 +176,9 @@ def doctor(workspace: Path) -> dict:
         checks[name] = item
     checks["platform"] = {"supported": os.name == "posix", "python": sys.version.split()[0]}
     checks["config"] = {"provider": config.provider, "permissions": config.permissions,
-                         "rubber_duck_profile": config.rubber_duck_profile, "acceptance_commands": config.verify}
+                         "rubber_duck_profile": config.rubber_duck_profile,
+                         "claude_pentest_model": config.claude_pentest_model,
+                         "acceptance_commands": config.verify}
     checks["note"] = "Checks binary presence only, not live authentication, quota or model access."
     checks["quota_policy"] = "wait_only: no /usage, quota claims, paid extensions or automatic provider/account switching"
     checks["compression"] = {"headroom_mode": "local library, no API proxy", "claude_bash_hook": config.claude_hook,
@@ -179,8 +192,11 @@ def doctor(workspace: Path) -> dict:
                         "coding_workers": {"codex": config.codex_worker_model, "claude": config.claude_worker_model},
                         "rubber_duck": {"profile": config.rubber_duck_profile,
                                         "general": {"from_claude": config.codex_duck_model, "from_codex": config.claude_duck_model},
-                                        "authorized_security": {"from_claude": config.codex_security_duck_model,
-                                                                  "from_codex": config.claude_security_duck_model}},
+                         "authorized_security": {"from_claude": config.codex_security_duck_model,
+                                                                   "from_codex": config.claude_security_duck_model}},
+                         "copilot_fallback": {"enabled": config.copilot_fallback, "model": config.copilot_fallback_model},
+                        "codex_native_model": config.codex_native_model,
+                        "claude_pentest_model": config.claude_pentest_model,
                         "enabled": {"workers": config.delegate_coding, "rubber_duck": config.rubber_duck, "beads": config.beads},
                         "coordinator": "your selected native-session model; reviews worker edits and acceptance checks"}
     return checks
@@ -239,7 +255,8 @@ def main(argv=None) -> int:
             return run_native(workspace, args.command, args.provider_args[1:])
         if args.command == "mcp":
             from .mcp import serve
-            return serve(workspace)
+            return serve(workspace, args.bootstrap_config, args.bootstrap_provider, args.bootstrap_profile,
+                         args.bootstrap_helper, args.bootstrap_managed)
         if args.command == "native-status":
             for path in sorted((workspace / ".tinkertom/native").glob("*/state.json")):
                 print(path.read_text())

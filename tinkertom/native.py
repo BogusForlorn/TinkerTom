@@ -15,24 +15,42 @@ import time
 import tomllib
 
 from .codex_proxy import CodexBridge
+from .codex_proxy import COORDINATOR_POLICY
 from .config import load_config
 from .native_state import CONTINUE, NativeState
 from .optimization import provider_environment, SUITE_ROOT
 from .storage import Store, atomic_write
 
 
-def mcp_config(workspace):
-    return {"command": sys.executable, "args": ["-m", "tinkertom", "-C", str(workspace), "mcp"]}
+def mcp_config(workspace, config_path=None, provider=None, profile=None, helper=False, managed=False):
+    workspace = Path(workspace).resolve()
+    args = ["-m", "tinkertom", "-C", str(workspace), "mcp"]
+    if config_path is not None:
+        args += ["--__tinkertom-config", str(Path(config_path).resolve())]
+    if provider is not None:
+        args += ["--__tinkertom-provider", provider]
+    if profile is not None:
+        args += ["--__tinkertom-profile", profile]
+    if helper:
+        args.append("--__tinkertom-helper")
+    if managed:
+        args.append("--__tinkertom-managed")
+    return {"command": sys.executable, "args": args}
 
 
-def codex_settings(workspace):
-    server = mcp_config(workspace)
-    return ["-c", "mcp_servers.tinkertom.command=" + json.dumps(server["command"]),
+def codex_settings(workspace, config_path=None, provider=None, profile=None, helper=False, managed=False,
+                   auto_approve=False):
+    server = mcp_config(workspace, config_path, provider, profile, helper, managed)
+    settings = ["-c", "mcp_servers.tinkertom.command=" + json.dumps(server["command"]),
             "-c", "mcp_servers.tinkertom.args=" + json.dumps(server["args"]),
             "-c", "mcp_servers.tinkertom.tool_timeout_sec=604800"]
+    if auto_approve:
+        settings += ["-c", 'mcp_servers.tinkertom.default_tools_approval_mode="approve"']
+    return settings
 
 
-def claude_settings(directory, workspace, config, extra):
+def claude_settings(directory, workspace, config, extra, config_path=None, provider=None, profile=None,
+                    helper=False, managed=False):
     """Combine explicit --settings hooks without editing provider files."""
     settings, forwarded = {}, []
     iterator = iter(extra)
@@ -64,7 +82,8 @@ def claude_settings(directory, workspace, config, extra):
     path = directory / "claude-hooks.json"
     atomic_write(path, json.dumps(settings))
     mcp = directory / "mcp.json"
-    atomic_write(mcp, json.dumps({"mcpServers": {"tinkertom": {"type": "stdio", **mcp_config(workspace)}}}))
+    atomic_write(mcp, json.dumps({"mcpServers": {"tinkertom": {"type": "stdio", **mcp_config(
+        workspace, config_path, provider, profile, helper, managed)}}}))
     return ["--settings", str(path), "--mcp-config", str(mcp)], forwarded
 
 
@@ -86,19 +105,36 @@ def native_profile_args(extra):
     return "general", extra
 
 
+def claude_model_override(extra):
+    """Whether provider arguments explicitly select Claude's model."""
+    for arg in extra:
+        if arg == "--":
+            break
+        if arg == "--model" or arg.startswith("--model="):
+            return True
+        if arg == "-m" or (arg.startswith("-m") and not arg.startswith("--")):
+            return True
+    return False
+
+
 def codex_start_permissions(config, extra):
-    """Apply the wrapper's new-thread default unless the user selects a policy."""
-    if config.permissions != "yolo":
-        return None
+    """Return only defaults not explicitly selected by provider arguments."""
+    policy_override = False
+    model_override = False
     for index, arg in enumerate(extra):
         if arg == "--":
             break
         option = arg.split("=", 1)[0]
         if option in {"--sandbox", "--ask-for-approval", "--approve-for-me", "--full-auto",
-                      "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--profile", "--permissions"}:
-            return None
-        if arg.startswith(("-s", "-a", "-p")) and not arg.startswith("--"):
-            return None
+                      "--dangerously-bypass-approvals-and-sandbox", "--yolo", "--permissions"}:
+            policy_override = True
+        if option in {"--model"} or (arg.startswith("-m") and not arg.startswith("--")):
+            model_override = True
+        if option == "--profile" or (arg.startswith("-p") and not arg.startswith("--")):
+            # Profiles can select both model and permission settings.
+            policy_override = model_override = True
+        if arg.startswith(("-s", "-a")) and not arg.startswith("--"):
+            policy_override = True
         value = None
         if arg in {"-c", "--config"} and index + 1 < len(extra):
             value = extra[index + 1]
@@ -109,30 +145,38 @@ def codex_start_permissions(config, extra):
         if value:
             key = value.split("=", 1)[0].strip().strip('"')
             if key in {"approval_policy", "sandbox_mode", "permissions"} or key.startswith(("permissions.", "sandbox_workspace_write.")):
-                return None
-    return {"approvalPolicy": "never", "sandbox": "danger-full-access"}
+                policy_override = True
+            if key in {"model", "model_provider"} or key.startswith("model."):
+                model_override = True
+    policy = {}
+    if not policy_override:
+        policy.update(approvalPolicy="never",
+                      sandbox="danger-full-access" if config.permissions == "yolo" else "workspace-write")
+    if not model_override:
+        policy["model"] = config.model or config.codex_native_model
+    return policy or None
 
 
 async def codex_ui(executable, extra, workspace, config, env, state, lease_fd):
     from websockets.asyncio.server import unix_serve
-    settings = codex_settings(workspace)
-    if config.permissions == "yolo":
-        # The remote TUI rejects permission override flags when resuming a
-        # thread (including /resume inside an initially fresh UI). Configure
-        # our private app-server instead; leave its policy checks in force.
-        settings += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="danger-full-access"']
+    policy = codex_start_permissions(config, extra)
+    settings = codex_settings(workspace, state.directory / "config.json", "codex",
+                               config.rubber_duck_profile, managed=True,
+                               auto_approve=bool(policy and policy.get("approvalPolicy") == "never"))
+    if policy and "approvalPolicy" in policy:
+        settings += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="' + policy["sandbox"] + '"']
     saved = state.read()
     if not extra and saved.get("status") in {"waiting", "resuming"} and saved.get("session_id"):
         extra = ["resume", saved["session_id"]]
     flags = []
-    if config.model:
-        flags += ["--model", config.model]
+    if policy and "model" in policy:
+        flags += ["--model", policy["model"]]
     # Short private socket path avoids AF_UNIX limits in deeply nested projects.
     with tempfile.TemporaryDirectory(prefix="tt-") as runtime:
         socket_path = str(Path(runtime) / "codex.sock")
         upstream = str(Path(runtime) / "backend.sock")
         bridge = CodexBridge(upstream, workspace, env, state, config, lease_fd,
-                             start_permissions=codex_start_permissions(config, extra))
+                             start_permissions=policy)
         with (state.directory / "app-server.log").open("ab") as log:
             backend = await asyncio.create_subprocess_exec(executable, *settings, "app-server", "--listen", "unix://" + upstream,
                 cwd=workspace, env=env, stdout=log, stderr=log, start_new_session=True, pass_fds=(lease_fd,))
@@ -164,11 +208,21 @@ async def codex_ui(executable, extra, workspace, config, env, state, lease_fd):
 
 
 def claude_ui(executable, extra, workspace, config, env, state, lease_fd):
-    settings, forwarded = claude_settings(state.directory, workspace, config, extra)
+    settings, forwarded = claude_settings(state.directory, workspace, config, extra,
+                                          state.directory / "config.json", "claude",
+                                          config.rubber_duck_profile, managed=True)
     flags = ["--dangerously-skip-permissions"] if config.permissions == "yolo" else []
-    if config.model:
-        flags += ["--model", config.model]
-    base = [executable, *flags, *settings]
+    explicit_model = claude_model_override(forwarded)
+    selected_model = config.model
+    if not explicit_model and not selected_model and config.rubber_duck_profile == "authorized_security":
+        selected_model = config.claude_pentest_model
+    if not explicit_model and selected_model:
+        flags += ["--model", selected_model]
+    if config.rubber_duck_profile in {"general", "authorized_security"}:
+        flags += ["--append-system-prompt", COORDINATOR_POLICY,
+                  "--system-prompt-snapshot", "off",
+                  "--disallowedTools", "Edit,Write,NotebookEdit,Bash"]
+    base = [executable, *flags]
     saved = state.read()
     if not forwarded and saved.get("status") in {"waiting", "resuming"} and saved.get("session_id"):
         forwarded = ["--resume", saved["session_id"]]
@@ -190,7 +244,9 @@ def claude_ui(executable, extra, workspace, config, env, state, lease_fd):
                             return 0
                         prompt = CONTINUE + "\n\n" + "\n\n".join(current.get("pending_prompts", []))
                         current.update(status="resuming")
-                        command = [*base, "--resume", current["session_id"], prompt]
+                        # Keep the positional continuation before Claude's
+                        # variadic --mcp-config, just like the initial launch.
+                        command = [*base, "--resume", current["session_id"], prompt, *settings]
                     break
                 time.sleep(0.25)
             else:
@@ -205,9 +261,10 @@ def run_native(workspace: Path, provider: str, extra: list[str]) -> int:
         raise ValueError("A managed agent cannot recursively open a native supervisor")
     profile, extra = native_profile_args(extra)
     changes = {"provider": provider, "rubber_duck_profile": profile}
-    # Keep the requested YOLO default while respecting an explicit project setting.
     path = workspace / "tinkertom.toml"
-    if not path.exists() or "permissions" not in tomllib.loads(path.read_text()):
+    # Keep Claude's historical config-less YOLO default. Codex now has its own
+    # never/workspace-write default and must not change Claude launch behavior.
+    if provider == "claude" and (not path.exists() or "permissions" not in tomllib.loads(path.read_text())):
         changes["permissions"] = "yolo"
     if "--tt-standard" in extra:
         extra.remove("--tt-standard")
@@ -244,6 +301,9 @@ def run_native(workspace: Path, provider: str, extra: list[str]) -> int:
                    TINKERTOM_RTK=str(int(config.rtk)), TINKERTOM_HEADROOM=str(int(config.headroom)))
         if provider == "claude":
             env["MCP_TOOL_TIMEOUT"] = "604800000"
+            # Claude's built-in tool search can hide the preloaded TinkerTom
+            # MCP tools. Scope this only to the native Claude child.
+            env["ENABLE_TOOL_SEARCH"] = "false"
         env["PYTHONPATH"] = str(SUITE_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         terminal = termios.tcgetattr(sys.stdin.fileno())
         old = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}

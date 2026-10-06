@@ -19,16 +19,18 @@ tinkertom native-status
 tinkertom doctor
 ```
 
-`setup.sh` configures the shell integration in your local `~/.zshrc` or `~/.bashrc`. Native mode defaults to the requested YOLO permissions unless the project explicitly configures `permissions`; `--tt-standard` uses provider permission prompts. A plain native launch selects the `general` rubber-duck profile; add the exact leading `pentest` token for `authorized_security`. That mode token is consumed by TinkerTom. To pass a literal provider argument or prompt beginning with `pentest`, use the provider separator, for example `tinkertom codex -- pentest`. All following provider arguments pass through unchanged. There is no `Task for codex:` prompt or TinkerTom chat screen in native mode.
+`setup.sh` configures the shell integration in your local `~/.zshrc` or `~/.bashrc`. Native Codex defaults to `gpt-daybreak-blue-latest`, approval `never`, and `workspace-write`; explicit provider flags win. Explicit `permissions = "yolo"` maps to full access. A plain native launch selects the `general` rubber-duck profile; add the exact leading `pentest` token for `authorized_security`. That mode token is consumed by TinkerTom. To pass a literal provider argument or prompt beginning with `pentest`, use the provider separator, for example `tinkertom codex -- pentest`. All following provider arguments pass through unchanged. There is no `Task for codex:` prompt or TinkerTom chat screen in native mode.
 
 For root-mode Claude, TinkerTom supplies the requested `IS_SANDBOX=1` together with `--dangerously-skip-permissions`, including on automatic retries. The variable is scoped to Claude's process environment; it does not create an OS sandbox. `--tt-standard` selects normal provider permissions.
 
-The native UI loads a local **TinkerTom MCP server** with RTK/Headroom command compression, focused file reads, Python symbol navigation, local cooldown status, smaller-model coding workers, opposite-provider rubber-duck reviews, and Beads task/memory tools. Claude also receives the simple-Bash optimization hook. Codex receives guidance to use the MCP tools; its built-in shell is not forcibly intercepted. Your existing global provider files aren't rewritten.
+The native UI loads a local **TinkerTom MCP server** with RTK/Headroom command compression, focused file reads, Python symbol navigation, local cooldown status, smaller-model coding workers, opposite-provider rubber-duck reviews, and Beads task/memory tools. In normal autonomous native Codex mode, TinkerTom pre-approves only its own MCP tools; explicit provider permission/profile overrides retain prompts. Skills are instruction bundles and have no per-call approval. Claude also receives the simple-Bash optimization hook. Codex receives guidance to use the MCP tools; its built-in shell is not forcibly intercepted. TinkerTom MCP commands/helpers run with the local OS user's privileges and are not bounded by Codex `workspace-write`; Codex built-in shell/files remain `workspace-write`. Provider/org policies and MCP elicitation can still prompt. Your existing global provider files aren't rewritten.
 
 | Main UI | Coding worker | Rubber duck |
 | --- | --- | --- |
-| `tinkertom codex` | Codex GPT-5.6 Luna | configured Claude reviewer |
-| `tinkertom claude` | Claude Code Sonnet | configured Codex reviewer |
+| `tinkertom codex` | Codex GPT-5.6 Luna | Claude reviewer (Opus 4.6 for authorized security) |
+| `tinkertom claude` | Claude Code Sonnet | Codex reviewer (Daybreak for authorized security) |
+
+`tinkertom claude pentest` uses Claude Opus 4.6 as coordinator and Sonnet for coding workers. An explicit Claude `--model` (including `--model=...`) wins over the project `model`; otherwise the project model wins, and pentest uses `claude_pentest_model` when neither is set. Pentest changes the role/model profile only; it does not change provider permissions. Native Claude sessions deny built-in `Edit`, `Write`, `NotebookEdit`, and `Bash`, while TinkerTom MCP read/run/code_worker remain available. The coordinator must delegate implementation, review worker diffs, run acceptance checks, and deliver; `run` and shell are for diagnostics/tests/git, not source rewriting.
 
 Your chosen main model coordinates and reviews. Helpers use the installed CLIs and existing login sessions. Beads stores tasks, dependencies and durable discoveries locally. See [workflow, configuration and cost controls](docs/agents.md). Restart an already-running launcher to load the updated bridge and tool list.
 
@@ -183,6 +185,9 @@ Other controls in `tinkertom.toml`:
 | `rtk`, `headroom` | `true` | Enable installed output reducers |
 | `claude_hook` | `true` | Automatically wrap supported simple Claude Bash calls |
 | `beads`, `delegate_coding`, `rubber_duck` | `true` | Enable local task memory, implementation workers and independent critiques |
+| `copilot_fallback`, `copilot_fallback_model` | `true`, `claude-opus-5.5` | One eligible Codex-parent Claude review fallback |
+| `codex_native_model` | `gpt-daybreak-blue-latest` | Native Codex default only |
+| `claude_pentest_model` | `claude-opus-4-6` | Native Claude pentest coordinator default |
 | `agent_timeout_seconds` | `900` | Bound each helper CLI invocation, excluding quota cooldowns |
 | `worker_max_turns` | `8` | Bound successful helper turns before coordinator intervention |
 

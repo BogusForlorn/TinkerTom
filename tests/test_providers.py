@@ -1,5 +1,7 @@
 import json
 import unittest
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from tinkertom.config import Config
 from tinkertom.providers import Events, Outcome, command, parse_report, reset_time
@@ -32,6 +34,31 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reset_time("retry at 2026-09-08T16:00:00+08:00", 1000), 1788854400)
         self.assertIsNone(reset_time("resets 3pm (local time)", 1000))
         self.assertIsNone(reset_time({"resetsAt": 999}, 1000))
+
+    def test_reset_clock_fallback_is_timezone_qualified_and_scoped(self):
+        zone = ZoneInfo("Asia/Singapore")
+        now = datetime(2026, 10, 6, 14, 0, tzinfo=zone).timestamp()
+        value = reset_time({"error_details": "resets 2:50pm (Asia/Singapore)"}, now)
+        self.assertEqual(datetime.fromtimestamp(value, zone).strftime("%Y-%m-%d %H:%M"), "2026-10-06 14:50")
+        self.assertEqual(reset_time({"last_assistant_message": "resets 14:50 (Asia/Singapore)"}, now), value)
+        self.assertIsNone(reset_time({"cwd": "resets 2:50pm (Asia/Singapore)"}, now))
+        self.assertIsNone(reset_time({"error_details": "resets 2:50pm (local)"}, now))
+        self.assertIsNone(reset_time({"error_details": "resets tomorrow at 2:50pm (Asia/Singapore)"}, now))
+        self.assertEqual(reset_time({"resetsAt": now + 3600, "error_details": "resets 2pm (Asia/Singapore)"}, now), now + 3600)
+
+    def test_reset_clock_handles_grace_rollover_and_meridiem(self):
+        zone = ZoneInfo("Asia/Singapore")
+        now = datetime(2026, 10, 6, 14, 3, tzinfo=zone).timestamp()
+        self.assertEqual(reset_time({"error_details": "resets 2pm (Asia/Singapore)"}, now), now)
+        rollover = reset_time({"error_details": "resets 12pm (Asia/Singapore)"}, now)
+        self.assertEqual(datetime.fromtimestamp(rollover, zone).strftime("%Y-%m-%d %H:%M"), "2026-10-07 12:00")
+        midnight = reset_time({"error_details": "resets 12am (Asia/Singapore)"}, now)
+        self.assertEqual(datetime.fromtimestamp(midnight, zone).strftime("%Y-%m-%d %H:%M"), "2026-10-07 00:00")
+
+    def test_reset_clock_rejects_nonexistent_dst_time(self):
+        zone = ZoneInfo("America/New_York")
+        now = datetime(2026, 3, 8, 1, 0, tzinfo=zone).timestamp()
+        self.assertIsNone(reset_time({"error_details": "resets 2:30am (America/New_York)"}, now))
 
     def test_tool_output_cannot_trigger_limit_or_completion(self):
         events = Events("codex", lambda: 1000)

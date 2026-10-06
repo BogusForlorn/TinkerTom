@@ -12,12 +12,17 @@ from .native_state import CONTINUE, schedule, wait_message
 from .providers import reset_time
 
 
+COORDINATOR_POLICY = """
+You are the coordinating and reviewing model for this TinkerTom session. Implementation changes go through the code_worker MCP tool with a bounded task and explicit file scope. The main coordinator plans, reviews worker diffs, requests worker corrections, runs acceptance checks, and delivers the result.
+Do not directly edit source files or use TinkerTom's run tool or shell commands to rewrite source as a delegation bypass. TinkerTom run is for diagnostics, tests, and git inspection only. Do not retain or invent a small-direct-edit exception. TinkerTom MCP read, symbols, run, rubber_duck, code_worker, and related tools remain available.
+"""
+
 INSTRUCTIONS = """
-I authorize TinkerTom’s rubber-duck tool to send relevant repository source code, tests, setup scripts, documentation, diffs, and implementation context to Anthropic through my Claude Code login, using the configured Opus reviewer. This covers repeated reviews during this project’s development until I revoke it. Exclude credentials, secrets, customer data, and engagement findings unless I separately authorize them. Ask only when a request falls outside this scope.
+The user authorizes TinkerTom’s rubber-duck tool to send relevant repository source code, tests, setup scripts, documentation, diffs, and implementation context to the configured opposite-provider reviewer through the user's existing provider login. This covers repeated reviews during this project’s development until revoked. Exclude credentials, secrets, customer data, and engagement findings unless separately authorized. Ask only when a request falls outside this scope.
 TinkerTom local suite is available through the tinkertom MCP server.
 Prefer its run tool for verbose commands: RTK -> deduplication -> local Headroom -> bounded preview, with saved logs and exit status. Use focused read/symbols tools. Inspect raw logs when exact output matters. Avoid repeating full-file reads and unchanged context; retain native compaction and session history.
 Work autonomously on the user's current coding task until complete or a concrete blocker needs input. Keep brief milestone/recovery notes in .tinkertom/checkpoint.md for long tasks; inspect working files before retrying interrupted actions.
-Act as the coordinating and reviewing model. Use the code_worker MCP tool for substantial implementation: specify a bounded task, file scope and acceptance checks. It selects GPT-5.6 Luna or Sonnet; you retain planning and final review. Don't edit the same files concurrently with a worker. Inspect the resulting diff and independently run relevant acceptance checks before claiming completion. Small direct edits are reasonable when delegation would cost more than it saves.
+""" + COORDINATOR_POLICY + """
 Use rubber_duck to challenge significant plans, uncertain assumptions or consequential changes before finalizing. Supply a concise proposal and evidence; evaluate the critique rather than treating another model as ground truth. It uses the opposite provider's CLI. Avoid repeatedly asking for identical critiques; results are cached.
 Use beads to track multi-step work, dependencies and durable discoveries. Check ready tasks/memory after compaction or resuming; create and claim bounded tasks, record progress/blockers, and close them only after review and verification. Don't create new beads for trivial chat. Long helper calls can wait through quota resets without polling; cancel the tool if the user cancels the work. Never recursively delegate from a helper.
 Quota recovery is handled outside the model. Do not query /usage, /usage-credits or /extra-usage, claim/reset quota, purchase credits, enable overage, or switch billing/accounts/models/providers to bypass limits. Follow direct user instructions about their task and stop when they cancel it."""
@@ -61,8 +66,10 @@ class CodexBridge:
             # Remote TUI defaults can mask the private backend defaults. Apply
             # the requested launch policy only to new threads; resume, forks,
             # turns and later permission changes retain provider semantics.
-            params.pop("permissions", None)  # Cannot combine named profile and sandbox.
-            params.update(self.start_permissions)
+            if "sandbox" in self.start_permissions:
+                params.pop("permissions", None)  # Cannot combine named profile and sandbox.
+            params.update({key: value for key, value in self.start_permissions.items()
+                           if key != "model" or not params.get("model")})
             message["params"] = params
         if method in {"thread/start", "thread/resume", "thread/fork", "account/rateLimits/read"}:
             self.requests[(connection, message.get("id"))] = method

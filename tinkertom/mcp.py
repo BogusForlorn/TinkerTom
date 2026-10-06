@@ -11,6 +11,54 @@ from .compact import compact
 from .navigation import read_file, symbols
 
 
+def _closed(value, allowed, name):
+    if value not in allowed:
+        raise ValueError(f"Invalid MCP bootstrap {name}")
+    return value
+
+
+def bootstrap_context(workspace, config_path=None, provider=None, profile=None, helper=False, managed=False):
+    """Load explicit provider context before any MCP request is handled."""
+    if provider is not None:
+        _closed(provider, {"codex", "claude"}, "provider")
+    if profile is not None:
+        _closed(profile, {"general", "authorized_security"}, "profile")
+    if config_path is None:
+        if provider is not None or profile is not None or helper or managed:
+            raise ValueError("MCP bootstrap config is required with explicit context")
+        return None
+    path = Path(config_path)
+    if not path.is_absolute():
+        path = workspace / path
+    path = path.resolve()
+    if not path.is_relative_to((workspace / ".tinkertom").resolve()):
+        raise ValueError("MCP bootstrap config must stay under the workspace .tinkertom directory")
+    if not path.is_file():
+        raise ValueError("MCP bootstrap config does not exist")
+    try:
+        from .config import Config
+        config = Config(**json.loads(path.read_text())).validate()
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("MCP bootstrap config is invalid") from exc
+    provider = provider if provider is not None else config.provider
+    profile = profile if profile is not None else config.rubber_duck_profile
+    config = Config(**{**config.to_dict(), "provider": provider, "rubber_duck_profile": profile}).validate()
+    os.environ["TINKERTOM_CONFIG_PATH"] = str(path)
+    os.environ["TINKERTOM_PROVIDER"] = provider
+    os.environ["TINKERTOM_PROFILE"] = profile
+    os.environ["TINKERTOM_RTK"] = str(int(config.rtk))
+    os.environ["TINKERTOM_HEADROOM"] = str(int(config.headroom))
+    if helper:
+        os.environ["TINKERTOM_HELPER"] = "1"
+    else:
+        os.environ.pop("TINKERTOM_HELPER", None)
+    if managed:
+        os.environ["TINKERTOM_MANAGED"] = "1"
+    else:
+        os.environ.pop("TINKERTOM_MANAGED", None)
+    return config
+
+
 TOOLS = [
     {"name": "run", "description": "Run a shell command once with RTK, local Headroom, deduplication and bounded output. Saves logs and preserves exit status. Compression is lossy; raw=true returns exact output (potentially large).",
      "inputSchema": {"type": "object", "properties": {
@@ -188,6 +236,7 @@ async def serve_async(workspace):
         transport.close()
 
 
-def serve(workspace: Path) -> int:
+def serve(workspace: Path, config_path=None, provider=None, profile=None, helper=False, managed=False) -> int:
+    bootstrap_context(workspace, config_path, provider, profile, helper, managed)
     asyncio.run(serve_async(workspace))
     return 0

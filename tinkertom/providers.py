@@ -4,10 +4,11 @@ Tool output is deliberately never inspected for rate-limit/completion signals.
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import math
 import re
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import Config
 
@@ -42,11 +43,23 @@ def command(config: Config, session_id: str | None) -> list[str]:
     return argv
 
 
-def reset_time(data, now: float) -> float | None:
-    """Use explicit epochs, timezone-bearing ISO dates, or relative retry delays.
+def copilot_command(executable: str, model: str) -> list[str]:
+    """One-shot, text-only, tool-less Copilot review invocation."""
+    # With -p present Copilot ignores piped stdin, so prompt mode is selected
+    # by the non-TTY stdin itself instead of passing a literal "-" prompt.
+    return [executable, "--silent", "--model", model, "--reasoning-effort", "high",
+            "--available-tools", "", "--disable-builtin-mcps", "--no-custom-instructions",
+            "--no-ask-user", "--no-auto-update", "--no-remote", "--no-remote-export",
+            "--output-format", "text"]
 
-    Ambiguous local clock strings intentionally fall back to configured cooldown.
-    Multiple windows are combined using the latest reset, including weekly limits.
+
+def reset_time(data, now: float) -> float | None:
+    """Use structured reset values, timezone-bearing ISO dates, or retry delays.
+
+    As a fallback only, StopFailure ``error_details`` and
+    ``last_assistant_message`` may contain an explicit timezone-qualified clock
+    such as ``resets 2:50pm (Asia/Singapore)``. Bare/local clocks are ignored.
+    Multiple structured windows are combined using the latest reset.
     """
     candidates = []
 
@@ -95,12 +108,65 @@ def reset_time(data, now: float) -> float | None:
                 if delay > 0:
                     candidates.append(now + delay)
 
+    clock_pattern = re.compile(
+        r"\bresets\s+(\d{1,2})(?::([0-5]\d))?\s*([ap]m)?\s*\(([^()]+)\)", re.I
+    )
+
+    def clock_candidates(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if isinstance(key, str) and key.lower() in {"error_details", "last_assistant_message"}:
+                    clock_candidates(item)
+                elif isinstance(item, (dict, list)):
+                    # Find the relevant StopFailure key without inspecting
+                    # arbitrary scalar fields such as cwd.
+                    clock_candidates(item)
+        elif isinstance(value, list):
+            for item in value:
+                clock_candidates(item)
+        elif isinstance(value, str):
+            for match in clock_pattern.finditer(value):
+                hour = int(match.group(1))
+                minute = int(match.group(2) or 0)
+                meridiem = (match.group(3) or "").lower()
+                if meridiem:
+                    if hour < 1 or hour > 12:
+                        continue
+                    hour = hour % 12 + (12 if meridiem == "pm" else 0)
+                elif match.group(2) is None or hour > 23:
+                    continue
+                try:
+                    zone = ZoneInfo(match.group(4).strip())
+                except (ValueError, ZoneInfoNotFoundError):
+                    continue
+                zone_now = datetime.fromtimestamp(now, zone)
+                naive = zone_now.replace(hour=hour, minute=minute, second=0, microsecond=0, tzinfo=None)
+                # Prefer the later occurrence for an ambiguous fall-back time.
+                occurrence = naive.replace(tzinfo=zone, fold=1)
+                roundtrip = occurrence.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
+                if roundtrip != naive:
+                    continue  # nonexistent spring-forward local time
+                timestamp = occurrence.timestamp()
+                if timestamp <= now:
+                    if now - timestamp <= 5 * 60:
+                        timestamp = now
+                    else:
+                        next_day = naive + timedelta(days=1)
+                        occurrence = next_day.replace(tzinfo=zone, fold=1)
+                        roundtrip = occurrence.astimezone(ZoneInfo("UTC")).astimezone(zone).replace(tzinfo=None)
+                        if roundtrip != next_day:
+                            continue
+                        timestamp = occurrence.timestamp()
+                candidates.append(timestamp)
+
     walk(data)
+    if not candidates:
+        clock_candidates(data)
     return max(candidates) if candidates else None
 
 
 RATE_PATTERN = re.compile(r"rate[ _-]?limit|usage[ _-]?limit|usageLimitReached|too many requests|\b429\b|(?:hit|reached|exceeded).{0,30}(?:limit|quota)|limit.{0,20}(?:reached|exceeded)", re.I)
-AUTH_PATTERN = re.compile(r"unauthorized|unauthenticated|authentication|invalid.{0,10}(?:api.?key|token)|not logged in|please (?:log|sign) in|\b401\b|insufficient_quota|credit balance|billing|payment required|dangerously-skip-permissions.{0,60}root|permission denied|unknown (?:option|argument)|unexpected argument|model.{0,40}(?:not found|does not exist|not supported)", re.I)
+AUTH_PATTERN = re.compile(r"unauthorized|unauthenticated|authenticat(?:e|ion)|oauth|invalid.{0,10}(?:api.?key|token)|not logged in|please (?:log|sign) in|\b401\b|insufficient_quota|credit balance|billing|payment required|dangerously-skip-permissions.{0,60}root|permission denied|unknown (?:option|argument)|unexpected argument|model.{0,40}(?:not found|does not exist|not supported)", re.I)
 SESSION_PATTERN = re.compile(r"(?:session|thread|conversation).{0,60}(?:not found|does not exist|expired)|no (?:conversation|session).{0,30}(?:found|with)", re.I)
 CONTEXT_PATTERN = re.compile(r"context.{0,30}(?:exceeded|full|limit)|prompt is too long|maximum context length", re.I)
 
@@ -143,6 +209,11 @@ class Events:
         self.outcome = Outcome()
 
     def feed(self, line: str):
+        if self.provider == "copilot":
+            separator = "\n" if self.outcome.final_text else ""
+            self.outcome.final_text = (self.outcome.final_text + separator + line)[-64000:]
+            self.outcome.success = True
+            return
         try:
             data = json.loads(line)
         except (ValueError, TypeError):

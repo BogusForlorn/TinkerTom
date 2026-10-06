@@ -112,6 +112,8 @@ def run_process(argv: list[str], *, cwd: Path, prompt: str, log_dir: Path,
             proc.stderr.close()
     if out.session_id and out.session_id != last_session and on_session:
         on_session(out.session_id)
+    if provider == "copilot" and not out.interrupted and out.returncode == 0:
+        out.success = True
     if provider and not out.interrupted and out.returncode != 0:
         out.success = False
         if not out.error_kind:

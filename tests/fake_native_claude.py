@@ -18,7 +18,9 @@ def hook(kind, **fields):
 
 
 with Path('native-calls.jsonl').open('a') as log:
-    log.write(json.dumps({'argv': args, 'cwd': os.getcwd(), 'at': time.time(), 'is_sandbox': os.environ.get('IS_SANDBOX')}) + '\n')
+    log.write(json.dumps({'argv': args, 'cwd': os.getcwd(), 'at': time.time(),
+                          'is_sandbox': os.environ.get('IS_SANDBOX'),
+                          'tool_search': os.environ.get('ENABLE_TOOL_SEARCH')}) + '\n')
 hook('SessionStart')
 print('NATIVE CLAUDE UI', flush=True)
 if '--resume' in args and args[-1] != session:

@@ -30,9 +30,13 @@ class Config:
     codex_worker_model: str = "gpt-5.6-luna"
     claude_worker_model: str = "sonnet"
     codex_duck_model: str = "gpt-5.6-sol"
-    claude_duck_model: str = "fable"
-    codex_security_duck_model: str = "gpt-5.6-sol"
+    claude_duck_model: str = "opus"
+    codex_security_duck_model: str = "gpt-daybreak-blue-latest"
     claude_security_duck_model: str = "claude-opus-4-6"
+    claude_pentest_model: str = "claude-opus-4-6"
+    copilot_fallback: bool = True
+    copilot_fallback_model: str = "claude-opus-5.5"
+    codex_native_model: str = "gpt-daybreak-blue-latest"
     agent_timeout_seconds: float = 900
     worker_max_turns: int = 8
     verify: list[str] | None = None
@@ -58,10 +62,11 @@ class Config:
             raise ValueError("max_failures/max_stalls must be positive; checkpoint_chars must be >= 100")
         if not isinstance(self.model, str) or not isinstance(self.executable, str):
             raise ValueError("model/executable must be strings")
-        if any(type(getattr(self, name)) is not bool for name in ("rtk", "headroom", "claude_hook", "beads", "delegate_coding", "rubber_duck")):
+        if any(type(getattr(self, name)) is not bool for name in ("rtk", "headroom", "claude_hook", "beads", "delegate_coding", "rubber_duck", "copilot_fallback")):
             raise ValueError("Optimizer and orchestration switches must be booleans")
         for name in ("codex_worker_model", "claude_worker_model", "codex_duck_model", "claude_duck_model",
-                     "codex_security_duck_model", "claude_security_duck_model"):
+                     "codex_security_duck_model", "claude_security_duck_model", "claude_pentest_model",
+                     "copilot_fallback_model", "codex_native_model"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
                 raise ValueError(f"{name} must be a model name")
         if type(self.worker_max_turns) is not int or not 1 <= self.worker_max_turns <= 100:

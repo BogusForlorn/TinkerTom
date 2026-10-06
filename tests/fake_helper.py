@@ -15,6 +15,7 @@ with calls.open('a') as out:
     out.write(json.dumps({'argv': sys.argv[1:], 'provider': provider, 'prompt': prompt,
         'cwd': os.getcwd(), 'at': time.time(), 'pid': os.getpid(),
         'helper': os.environ.get('TINKERTOM_HELPER'), 'native': os.environ.get('TINKERTOM_NATIVE_DIR'),
+        'task_dir': os.environ.get('TINKERTOM_TASK_DIR'), 'attempt': os.environ.get('TINKERTOM_ATTEMPT'),
         'parent_identity': {key: os.environ.get(key) for key in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID', 'CODEX_THREAD_ID')},
         'is_sandbox': os.environ.get('IS_SANDBOX'), 'mcp_timeout': os.environ.get('MCP_TOOL_TIMEOUT')}) + '\n')
 
@@ -23,7 +24,7 @@ def emit(value):
 
 if provider == 'codex':
     emit({'type': 'thread.started', 'thread_id': 'helper-exact'})
-else:
+elif provider == 'claude':
     emit({'type': 'system', 'subtype': 'init', 'session_id': 'helper-exact'})
 step = scenario['steps'][min(count, len(scenario['steps']) - 1)]
 if step == 'rate':
@@ -39,13 +40,23 @@ if step == 'sleep':
 if step == 'auth':
     print('401 authentication failed', file=sys.stderr)
     sys.exit(1)
-if step == 'review':
+if step == 'oauth':
+    print('Failed to authenticate: OAuth session expired and could not be refreshed', file=sys.stderr)
+    sys.exit(1)
+if step == 'http503':
+    print('HTTP 503 service unavailable', file=sys.stderr)
+    sys.exit(1)
+if step == 'refusal':
+    report = 'I cannot help with that request.'
+elif step == 'review':
     report = 'Verdict: needs verification. Check the zero-length input boundary.'
 else:
     (root / 'feature.txt').write_text('implemented\n')
     report = json.dumps({'attempt': os.environ['TINKERTOM_ATTEMPT'], 'status': 'complete',
         'summary': 'Implemented fixture change; coordinator must verify.', 'next_steps': []})
-if provider == 'codex':
+if provider == 'copilot':
+    print(report, flush=True)
+elif provider == 'codex':
     emit({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': report}})
     emit({'type': 'turn.completed', 'usage': {'input_tokens': 12, 'output_tokens': 5}})
 else:

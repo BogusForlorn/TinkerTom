@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -12,12 +13,13 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from tinkertom.cli import main
 from tinkertom.codex_proxy import CodexBridge, exhausted_windows
 from tinkertom.config import Config
 from tinkertom.mcp import response
-from tinkertom.native import claude_settings, codex_ui, codex_start_permissions, native_profile_args, run_native
+from tinkertom.native import claude_settings, claude_ui, codex_settings, codex_ui, codex_start_permissions, mcp_config, native_profile_args, run_native
 from tinkertom.native_hooks import handle
 from tinkertom.native_state import NativeState, schedule
 from tinkertom.optimization import suite_environment
@@ -94,10 +96,17 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(policy, {'approvalPolicy': 'never', 'sandbox': 'danger-full-access'})
         # Wrapper flags are removed before this function; the effective
         # config, not a forwarded CLI argument, expresses standard mode.
-        self.assertIsNone(codex_start_permissions(Config().validate(), []))
+        self.assertEqual(codex_start_permissions(Config().validate(), []),
+                         {'approvalPolicy': 'never', 'sandbox': 'workspace-write', 'model': 'gpt-daybreak-blue-latest'})
         for args in (['--sandbox', 'read-only'], ['-sworkspace-write'], ['--ask-for-approval=on-request'],
-                     ['--approve-for-me'], ['--profile', 'work'], ['-c', 'sandbox_mode="read-only"'],
+                     ['--approve-for-me'], ['-c', 'sandbox_mode="read-only"'],
                      ['--config=approval_policy="on-request"'], ['-cpermissions.default="readonly"']):
+            self.assertEqual(codex_start_permissions(config, args), {'model': 'gpt-daybreak-blue-latest'}, args)
+        for args in (['--model', 'chosen'], ['--model=chosen'], ['-m', 'chosen'], ['-mchosen'],
+                     ['-c', 'model="chosen"']):
+            self.assertEqual(codex_start_permissions(config, args),
+                             {'approvalPolicy': 'never', 'sandbox': 'danger-full-access'}, args)
+        for args in (['--profile', 'work'], ['-pwork']):
             self.assertIsNone(codex_start_permissions(config, args), args)
         bridge = CodexBridge([], self.workspace, {}, self.state, config, start_permissions=policy)
         start = {'id': 100, 'method': 'thread/start', 'params': {
@@ -227,6 +236,28 @@ class NativeTests(unittest.TestCase):
         handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
         self.assertEqual(state.read()['next_run_at'], first)
 
+    def test_claude_hook_uses_only_displayed_reset_error_fields(self):
+        zone = ZoneInfo('Asia/Singapore')
+        now = datetime(2026, 10, 6, 13, 50, tzinfo=zone).timestamp()
+        expected = datetime(2026, 10, 6, 14, 50, tzinfo=zone).timestamp()
+        for index, field in enumerate(('error_details', 'last_assistant_message')):
+            state = NativeState(self.workspace / f'.tinkertom/native/claude-{index}')
+            event = {'session_id': f'claude-{index}'}
+            handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
+            failure = {**event, 'hook_event_name': 'StopFailure', 'error': 'rate_limit',
+                       field: "You've hit your session limit \u00b7 resets 2:50pm (Asia/Singapore)"}
+            with patch('tinkertom.native_state.time.time', return_value=now):
+                handle(failure, state, self.config)
+            self.assertEqual(state.read()['next_run_at'], expected)
+
+        state = NativeState(self.workspace / '.tinkertom/native/claude-unrelated')
+        event = {'session_id': 'claude-unrelated'}
+        handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
+        with patch('tinkertom.native_state.time.time', return_value=now):
+            handle({**event, 'hook_event_name': 'StopFailure', 'error': 'rate_limit',
+                    'cwd': 'resets 2:50pm (Asia/Singapore)'}, state, self.config)
+        self.assertEqual(state.read()['next_run_at'], now + self.config.cooldown_seconds)
+
     def test_claude_settings_preserve_explicit_hooks(self):
         settings = {'hooks': {'PreToolUse': [{'hooks': [{'type': 'command', 'command': 'custom-hook'}]}]}, 'theme': 'dark'}
         flags, rest = claude_settings(self.state.directory, self.workspace, self.config, ['--model', 'custom', '--settings', json.dumps(settings)])
@@ -234,6 +265,66 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(written['theme'], 'dark')
         self.assertEqual(len(written['hooks']['PreToolUse']), 2)
         self.assertEqual(rest, ['--model', 'custom'])
+
+    def test_claude_coordinator_argv_model_precedence_and_policy(self):
+        cases = [
+            (Config(rubber_duck_profile='authorized_security').validate(), [], 'claude-opus-4-6'),
+            (Config().validate(), [], None),
+            (Config(model='project', rubber_duck_profile='authorized_security').validate(), [], 'project'),
+            (Config(model='project', rubber_duck_profile='authorized_security').validate(), ['--model=explicit'], 'explicit'),
+        ]
+        for config, extra, expected in cases:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+                workspace = Path(d)
+                state = NativeState(workspace / '.tinkertom/native/claude')
+                proc = SimpleNamespace(returncode=0, poll=lambda: 0)
+                with patch('tinkertom.native.subprocess.Popen', return_value=proc) as launch, \
+                        patch('tinkertom.native.termios.tcgetattr', return_value=[]), \
+                        patch('tinkertom.native.termios.tcsetattr'):
+                    self.assertEqual(claude_ui('claude', extra, workspace, config, {}, state, 0), 0)
+                command = launch.call_args.args[0]
+                self.assertEqual(command.count('--append-system-prompt'), 1)
+                self.assertEqual(command[command.index('--system-prompt-snapshot') + 1], 'off')
+                self.assertEqual(command[command.index('--disallowedTools') + 1], 'Edit,Write,NotebookEdit,Bash')
+                if expected:
+                    self.assertEqual(sum(arg == '--model' or arg.startswith('--model=') for arg in command), 1)
+                    self.assertTrue(any(arg == expected or arg == '--model' and command[command.index(arg) + 1] == expected or arg == '--model=' + expected for arg in command))
+                else:
+                    self.assertNotIn('--model', command)
+
+    def test_generated_mcp_bootstrap_is_explicit_for_native_and_helpers(self):
+        config_path = self.state.directory / 'config.json'
+        native = mcp_config(self.workspace, config_path, 'codex',
+                            'authorized_security', managed=True)
+        self.assertEqual(native['args'][-7:], [
+            '--__tinkertom-config', str(config_path),
+            '--__tinkertom-provider', 'codex',
+            '--__tinkertom-profile', 'authorized_security',
+            '--__tinkertom-managed'])
+        helper = mcp_config(self.workspace, config_path, 'claude', 'general',
+                            helper=True, managed=True)
+        self.assertEqual(helper['args'][-2:],
+                         ['--__tinkertom-helper', '--__tinkertom-managed'])
+
+        flags, _ = claude_settings(
+            self.state.directory, self.workspace, self.config, [], config_path,
+            'claude', 'authorized_security', managed=True)
+        mcp_path = Path(flags[flags.index('--mcp-config') + 1])
+        args = json.loads(mcp_path.read_text())['mcpServers']['tinkertom']['args']
+        self.assertIn('authorized_security', args)
+        self.assertIn('--__tinkertom-managed', args)
+
+        relative = mcp_config(Path('.'), Path('.tinkertom/native/codex/config.json'),
+                              'codex', 'authorized_security', managed=True)
+        self.assertEqual(Path(relative['args'][relative['args'].index('-C') + 1]), Path.cwd())
+        config_arg = relative['args'][relative['args'].index('--__tinkertom-config') + 1]
+        self.assertTrue(Path(config_arg).is_absolute())
+
+    def test_codex_mcp_auto_approval_is_opt_in_and_exact(self):
+        default = codex_settings(self.workspace)
+        self.assertNotIn('mcp_servers.tinkertom.default_tools_approval_mode="approve"', default)
+        enabled = codex_settings(self.workspace, auto_approve=True)
+        self.assertEqual(enabled[-2:], ['-c', 'mcp_servers.tinkertom.default_tools_approval_mode="approve"'])
 
     def test_mcp_handshake_navigation_and_failure_status(self):
         init = response({'id': 1, 'method': 'initialize', 'params': {'protocolVersion': '2025-03-26'}}, self.workspace)
@@ -282,9 +373,56 @@ class CodexLaunchTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(args[-2:], ['resume', 'saved-session'])
                     server_args = calls[0]
                     self.assertTrue(any('mcp_servers.tinkertom.command=' in item for item in server_args))
-                    self.assertEqual('approval_policy="never"' in server_args, permissions == 'yolo')
+                    joined = ' '.join(server_args)
+                    self.assertIn('--__tinkertom-provider', joined)
+                    self.assertIn('--__tinkertom-profile', joined)
+                    self.assertIn('--__tinkertom-managed', joined)
+                    self.assertIn('mcp_servers.tinkertom.default_tools_approval_mode="approve"', server_args)
+                    self.assertEqual('approval_policy="never"' in server_args, True)
                     self.assertEqual('sandbox_mode="danger-full-access"' in server_args, permissions == 'yolo')
+                    self.assertEqual('sandbox_mode="workspace-write"' in server_args, permissions == 'standard')
                     self.assertEqual(state.read(), saved)
+
+    async def test_explicit_short_and_long_models_win_without_duplicate_default(self):
+        for extra in (['-m', 'explicit-short'], ['--model=explicit-long']):
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as d:
+                workspace = Path(d)
+                state = NativeState(workspace / '.tinkertom/native/codex')
+                calls = []
+                async def server(*argv, **kwargs):
+                    calls.append(argv)
+                    Path(argv[argv.index('--listen') + 1].removeprefix('unix://')).touch()
+                    return SimpleNamespace(returncode=0)
+                ui = SimpleNamespace(returncode=0, poll=lambda: 0)
+                with patch('tinkertom.native.asyncio.create_subprocess_exec', side_effect=server), \
+                        patch('tinkertom.native.subprocess.Popen', return_value=ui) as launch:
+                    self.assertEqual(await codex_ui('codex', extra, workspace, Config().validate(), {}, state, 0), 0)
+                command = launch.call_args.args[0]
+                self.assertNotIn('gpt-daybreak-blue-latest', command)
+                self.assertEqual(command[-len(extra):], extra)
+                self.assertIn('approval_policy="never"', calls[0])
+                self.assertIn('sandbox_mode="workspace-write"', calls[0])
+
+    async def test_explicit_permission_flags_win_while_default_model_remains(self):
+        with tempfile.TemporaryDirectory() as d:
+            workspace = Path(d)
+            state = NativeState(workspace / '.tinkertom/native/codex')
+            calls = []
+            async def server(*argv, **kwargs):
+                calls.append(argv)
+                Path(argv[argv.index('--listen') + 1].removeprefix('unix://')).touch()
+                return SimpleNamespace(returncode=0)
+            ui = SimpleNamespace(returncode=0, poll=lambda: 0)
+            extra = ['-a', 'on-request', '-s', 'read-only']
+            with patch('tinkertom.native.asyncio.create_subprocess_exec', side_effect=server), \
+                    patch('tinkertom.native.subprocess.Popen', return_value=ui) as launch:
+                self.assertEqual(await codex_ui('codex', extra, workspace, Config().validate(), {}, state, 0), 0)
+            command = launch.call_args.args[0]
+            self.assertEqual(command[command.index('--model') + 1], 'gpt-daybreak-blue-latest')
+            self.assertEqual(command[-len(extra):], extra)
+            self.assertNotIn('approval_policy="never"', calls[0])
+            self.assertFalse(any('sandbox_mode=' in arg for arg in calls[0]))
+            self.assertNotIn('mcp_servers.tinkertom.default_tools_approval_mode="approve"', calls[0])
 
 
 class BridgeTransportTests(unittest.IsolatedAsyncioTestCase):
@@ -383,10 +521,17 @@ class NativeTerminalTests(unittest.TestCase):
                     self.assertEqual(len(calls), 2)
                     self.assertEqual(calls[0]['cwd'], directory)
                     self.assertGreaterEqual(calls[1]['at'] - calls[0]['at'], 1)
-                    self.assertIn('Also update docs', calls[1]['argv'][-1])
+                    retry = calls[1]['argv']
+                    self.assertIn('--resume', retry)
+                    self.assertIn('Also update docs', retry[retry.index('--resume') + 2])
+                    self.assertLess(retry.index('--resume'), retry.index('--mcp-config'))
                     self.assertNotIn('-p', calls[0]['argv'])
                     for call in calls:
                         self.assertIn('--dangerously-skip-permissions', call['argv'])
+                        self.assertEqual(call['tool_search'], 'false')
+                        self.assertEqual(call['argv'][call['argv'].index('--system-prompt-snapshot') + 1], 'off')
+                        self.assertEqual(call['argv'][call['argv'].index('--disallowedTools') + 1],
+                                         'Edit,Write,NotebookEdit,Bash')
                         if os.geteuid() == 0:
                             self.assertEqual(call['is_sandbox'], '1')
                 finally:

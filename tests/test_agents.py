@@ -9,9 +9,11 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tinkertom.agents import agent_call, helpers_waiting
+from tinkertom.agents import active_config, agent_call, helpers_waiting
 from tinkertom.beads import beads_call
+from tinkertom.config import Config
 from tinkertom.mcp import available_tools, response
+from tinkertom.mcp import bootstrap_context
 from tinkertom.process import run_process
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -24,7 +26,7 @@ class HelperTests(unittest.TestCase):
         self.workspace = Path(self.tmp.name)
         self.bin = self.workspace / 'bin'
         self.bin.mkdir()
-        for provider in ('claude', 'codex'):
+        for provider in ('claude', 'codex', 'copilot'):
             path = self.bin / provider
             path.write_text('#!' + sys.executable + '\n' + (ROOT / 'tests/fake_helper.py').read_text())
             path.chmod(0o755)
@@ -46,7 +48,7 @@ class HelperTests(unittest.TestCase):
         return [json.loads(x) for x in (self.workspace / 'calls.jsonl').read_text().splitlines()]
 
     def test_opposite_routing_readonly_and_review_cache_tracks_evidence(self):
-        for parent, other, model in [('codex', 'claude', 'fable'), ('claude', 'codex', 'gpt-5.6-sol')]:
+        for parent, other, model in [('codex', 'claude', 'opus'), ('claude', 'codex', 'gpt-5.6-sol')]:
             with self.subTest(parent=parent), patch.dict(os.environ, TINKERTOM_PROVIDER=parent):
                 self.scenario(['review'])
                 source = self.workspace / 'source.py'
@@ -84,7 +86,7 @@ class HelperTests(unittest.TestCase):
 
     def test_authorized_security_profile_routes_and_persists(self):
         (self.workspace / 'tinkertom.toml').write_text('rubber_duck_profile="authorized_security"\nreset_buffer_seconds=0\nretry_seconds=0.01\n')
-        for parent, other, model in [('codex', 'claude', 'claude-opus-4-6'), ('claude', 'codex', 'gpt-5.6-sol')]:
+        for parent, other, model in [('codex', 'claude', 'claude-opus-4-6'), ('claude', 'codex', 'gpt-daybreak-blue-latest')]:
             with self.subTest(parent=parent), patch.dict(os.environ, TINKERTOM_PROVIDER=parent):
                 self.scenario(['review'])
                 value, error = agent_call('rubber_duck', {'proposal': 'Check scope'}, self.workspace)
@@ -116,11 +118,174 @@ class HelperTests(unittest.TestCase):
                     self.assertEqual(second['mcp_timeout'], '604800000')
                 self.assertNotIn('/usage', second['argv'])
 
-    def test_auth_failure_never_falls_back_or_retries(self):
-        self.scenario(['auth'])
-        _, error = agent_call('rubber_duck', {'proposal': 'Review failure'}, self.workspace)
+    def test_general_codex_duck_falls_back_for_auth_and_http_with_full_prompt(self):
+        source = self.workspace / 'evidence.py'
+        source.write_text('important_snapshot = True\n')
+        for failure in ('auth', 'oauth', 'http503'):
+            with self.subTest(failure=failure):
+                self.scenario([failure, 'review'])
+                value, error = agent_call('rubber_duck', {
+                    'proposal': 'Review fallback boundaries ' + failure,
+                    'context': 'The caller supplied fallback context.',
+                    'files': ['evidence.py'],
+                    'force': True,
+                }, self.workspace)
+                result = json.loads(value)
+                self.assertFalse(error, value)
+                self.assertEqual((result['requested_primary_provider'], result['requested_primary_model']),
+                                 ('claude', 'opus'))
+                self.assertEqual((result['actual_provider'], result['actual_model']),
+                                 ('copilot', 'claude-opus-5.5'))
+                primary, fallback = self.calls()
+                self.assertEqual((primary['provider'], fallback['provider']), ('claude', 'copilot'))
+                self.assertNotIn('-p', fallback['argv'])
+                self.assertNotIn('--resume', fallback['argv'])
+                self.assertEqual(fallback['argv'][fallback['argv'].index('--model') + 1], 'claude-opus-5.5')
+                self.assertEqual(fallback['argv'][fallback['argv'].index('--reasoning-effort') + 1], 'high')
+                self.assertEqual(fallback['argv'][fallback['argv'].index('--available-tools') + 1], '')
+                self.assertIn('--disable-builtin-mcps', fallback['argv'])
+                self.assertNotEqual(fallback['cwd'], str(self.workspace))
+                self.assertFalse(Path(fallback['cwd']).exists())
+                self.assertIsNone(fallback['task_dir'])
+                self.assertIsNone(fallback['attempt'])
+                self.assertIn('Act as an independent rubber duck reviewer.', fallback['prompt'])
+                self.assertIn('Review fallback boundaries ' + failure, fallback['prompt'])
+                self.assertIn('The caller supplied fallback context.', fallback['prompt'])
+                self.assertIn('important_snapshot = True', fallback['prompt'])
+                directory = Path(result['log_dir'])
+                request = json.loads((directory / 'request.json').read_text())
+                state = json.loads((directory / 'state.json').read_text())
+                self.assertEqual((request['actual_provider'], state['actual_provider']), ('copilot', 'copilot'))
+
+    def test_missing_claude_persists_primary_request_then_falls_back(self):
+        self.scenario(['review'])
+        with patch('tinkertom.agents.shutil.which',
+                   side_effect=lambda name, **_: None if name == 'claude' else str(self.bin / name)):
+            value, error = agent_call('rubber_duck', {'proposal': 'Review missing primary'}, self.workspace)
+        result = json.loads(value)
+        self.assertFalse(error, value)
+        self.assertEqual(result['actual_provider'], 'copilot')
+        self.assertIn('CLI is missing', result['primary_failure'])
+        self.assertEqual([call['provider'] for call in self.calls()], ['copilot'])
+        directory = Path(result['log_dir'])
+        self.assertTrue((directory / 'request.json').exists())
+        self.assertTrue((directory / 'config.json').exists())
+        self.assertTrue((directory / 'state.json').exists())
+
+    def test_quota_and_authorized_security_failures_never_fallback(self):
+        self.scenario(['rate', 'review'], wait=.01)
+        value, error = agent_call('rubber_duck', {'proposal': 'Review quota route'}, self.workspace)
+        self.assertFalse(error, value)
+        self.assertTrue(all(call['provider'] == 'claude' for call in self.calls()))
+
+        (self.workspace / 'tinkertom.toml').write_text(
+            'rubber_duck_profile="authorized_security"\nreset_buffer_seconds=0\nretry_seconds=0.01\n')
+        for failure in ('auth', 'http503'):
+            with self.subTest(security_failure=failure):
+                self.scenario([failure])
+                value, error = agent_call('rubber_duck', {
+                    'proposal': 'Review authorized failure ' + failure, 'force': True}, self.workspace)
+                self.assertTrue(error)
+                result = json.loads(value)
+                self.assertEqual((result['actual_provider'], result['requested_primary_model']),
+                                 ('claude', 'claude-opus-4-6'))
+                providers = [call['provider'] for call in self.calls()]
+                self.assertGreaterEqual(len(providers), 1)
+                self.assertTrue(all(provider == 'claude' for provider in providers))
+
+        self.scenario(['review'])
+        with patch('tinkertom.agents.shutil.which',
+                   side_effect=lambda name, **_: None if name == 'claude' else str(self.bin / name)):
+            with self.assertRaisesRegex(ValueError, 'claude CLI is missing'):
+                agent_call('rubber_duck', {
+                    'proposal': 'Review authorized missing CLI', 'force': True}, self.workspace)
+        self.assertFalse((self.workspace / 'calls.jsonl').exists())
+
+    def test_successful_refusal_and_claude_parent_never_fallback(self):
+        self.scenario(['refusal'])
+        value, error = agent_call('rubber_duck', {'proposal': 'Review a refusal'}, self.workspace)
+        self.assertFalse(error, value)
+        self.assertIn('cannot help', json.loads(value)['report'])
+        self.assertEqual([call['provider'] for call in self.calls()], ['claude'])
+
+        with patch.dict(os.environ, TINKERTOM_PROVIDER='claude'):
+            self.scenario(['auth'])
+            value, error = agent_call('rubber_duck', {'proposal': 'Review from Claude parent'}, self.workspace)
         self.assertTrue(error)
-        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(json.loads(value)['actual_provider'], 'codex')
+        self.assertEqual([call['provider'] for call in self.calls()], ['codex'])
+
+    def test_fallback_failure_reports_both_blockers(self):
+        self.scenario(['auth', 'auth'])
+        value, error = agent_call('rubber_duck', {'proposal': 'Review double failure'}, self.workspace)
+        result = json.loads(value)
+        self.assertTrue(error)
+        self.assertEqual([call['provider'] for call in self.calls()], ['claude', 'copilot'])
+        self.assertIn('401 authentication failed', result['primary_failure'])
+        self.assertIn('401 authentication failed', result['fallback_failure'])
+        self.assertIn('Primary Claude failed:', result['reason'])
+        self.assertIn('Copilot fallback failed:', result['reason'])
+
+    def test_explicit_mcp_bootstrap_survives_sanitized_environment(self):
+        snapshot = self.workspace / '.tinkertom/native/codex/config.json'
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(json.dumps(Config(
+            provider='codex', rubber_duck_profile='general',
+            claude_security_duck_model='claude-opus-4-6').to_dict()))
+        hostile = {'PATH': self.env['PATH'], 'TT_FIXTURE_ROOT': str(self.workspace),
+                   'TINKERTOM_PROVIDER': 'claude', 'TINKERTOM_PROFILE': 'general',
+                   'TINKERTOM_HELPER': '1'}
+        with patch.dict(os.environ, hostile, clear=True):
+            bootstrap_context(self.workspace, snapshot, 'codex', 'authorized_security',
+                              helper=False, managed=True)
+            self.assertEqual(os.environ['TINKERTOM_PROVIDER'], 'codex')
+            self.assertEqual(os.environ['TINKERTOM_PROFILE'], 'authorized_security')
+            self.assertNotIn('TINKERTOM_HELPER', os.environ)
+            self.assertEqual(os.environ['TINKERTOM_MANAGED'], '1')
+            config = active_config(self.workspace)
+            self.assertEqual((config.provider, config.rubber_duck_profile),
+                             ('codex', 'authorized_security'))
+            self.scenario(['auth'])
+            value, error = agent_call('rubber_duck', {
+                'proposal': 'Review sanitized pentest bootstrap', 'force': True}, self.workspace)
+            result = json.loads(value)
+            self.assertTrue(error)
+            self.assertEqual((result['profile'], result['requested_primary_model']),
+                             ('authorized_security', 'claude-opus-4-6'))
+            self.assertEqual([call['provider'] for call in self.calls()], ['claude'])
+
+        with patch.dict(os.environ, hostile, clear=True):
+            bootstrap_context(self.workspace, snapshot, 'codex', 'general',
+                              helper=False, managed=True)
+            self.scenario(['auth', 'review'])
+            value, error = agent_call('rubber_duck', {
+                'proposal': 'Review sanitized general bootstrap', 'force': True}, self.workspace)
+            result = json.loads(value)
+            self.assertFalse(error, value)
+            self.assertEqual((result['profile'], result['requested_primary_model'], result['actual_provider']),
+                             ('general', 'opus', 'copilot'))
+
+    def test_helper_bootstrap_hides_delegation_and_invalid_context_fails_closed(self):
+        snapshot = self.workspace / '.tinkertom/agents/worker/config.json'
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(json.dumps(Config(provider='codex').to_dict()))
+        with patch.dict(os.environ, {'PATH': self.env['PATH']}, clear=True):
+            bootstrap_context(self.workspace, snapshot, 'codex', 'general',
+                              helper=True, managed=True)
+            names = {tool['name'] for tool in available_tools(self.workspace)}
+            self.assertNotIn('rubber_duck', names)
+            self.assertNotIn('code_worker', names)
+            self.assertEqual(os.environ['TINKERTOM_MANAGED'], '1')
+        with self.assertRaisesRegex(ValueError, 'does not exist'):
+            bootstrap_context(self.workspace, self.workspace / '.tinkertom/missing.json',
+                              'codex', 'authorized_security')
+        outside = Path(self.tmp.name).parent / 'outside-tinkertom-config.json'
+        outside.write_text(json.dumps(Config().to_dict()))
+        self.addCleanup(outside.unlink, missing_ok=True)
+        with self.assertRaisesRegex(ValueError, 'must stay under'):
+            bootstrap_context(self.workspace, outside, 'codex', 'general')
+        with self.assertRaisesRegex(ValueError, 'Invalid MCP bootstrap provider'):
+            bootstrap_context(self.workspace, snapshot, 'copilot', 'general')
 
     def test_role_scope_and_configuration_checks(self):
         with patch.dict(os.environ, TINKERTOM_HELPER='1'):

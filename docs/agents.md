@@ -57,7 +57,7 @@ Each helper invokes `codex exec` or `claude -p`, saves its exact native session 
 
 Helpers receive independent session environments: the launcher clears inherited Claude nesting/session markers and the parent Codex thread identifier. TinkerTom's helper-role guard remains active to prevent recursive delegation through its MCP tools.
 
-MCP tool timeouts are configured to seven days. The server remains responsive to ping, other tools and cancellation while helpers wait. The headless supervisor excludes its live helper's quota cooldown from the parent CLI timeout. Helper CLI invocations still have a 900-second default timeout; quota cooldown itself is outside that timeout. Authentication/model access failures return a blocker instead of silently substituting a model.
+MCP tool timeouts are configured to seven days. The server remains responsive to ping, other tools and cancellation while helpers wait. The headless supervisor excludes its live helper's quota cooldown from the parent CLI timeout. Helper CLI invocations still have a 900-second default timeout; quota cooldown itself is outside that timeout. General-profile reviews requested from Codex use Claude Opus first; one isolated, tool-less Copilot CLI fallback uses `claude-opus-5.5` only for missing Claude or eligible login/transport failures. Quota, billing, successful refusals and authorized-security reviews never switch providers, and results record primary failure plus actual provider/model.
 
 Cancelling the tool stops its child process group and saves a paused record. Closing the native launcher is not detaching; keep it alive, or use tmux. A pending MCP call is not restored across closing/reopening the client. Helper request, state, usage fields, critique/report and attempt logs remain under `.tinkertom/agents/`; the coordinator must inspect those and the working tree before reassigning cancelled work. Native main-session reset recovery is described in [native.md](native.md).
 
@@ -73,9 +73,13 @@ rubber_duck_profile = "general"       # or "authorized_security"
 codex_worker_model = "gpt-5.6-luna"
 claude_worker_model = "sonnet"
 codex_duck_model = "gpt-5.6-sol"
-claude_duck_model = "fable"
-codex_security_duck_model = "gpt-5.6-sol"
+claude_duck_model = "opus"
+codex_security_duck_model = "gpt-daybreak-blue-latest"
 claude_security_duck_model = "claude-opus-4-6"
+claude_pentest_model = "claude-opus-4-6"
+copilot_fallback = true
+copilot_fallback_model = "claude-opus-5.5"
+codex_native_model = "gpt-daybreak-blue-latest"
 agent_timeout_seconds = 900
 worker_max_turns = 8
 ```
@@ -83,5 +87,7 @@ worker_max_turns = 8
 `worker_max_turns` bounds successful helper CLI turns, not the number of internal tool calls or quota retries. A helper that exhausts the budget returns a blocker for coordinator inspection. Native sessions read configuration at launch; existing headless tasks retain their saved configuration.
 
 Smaller workers, bounded evidence, cached identical critiques, focused reads and RTK/Headroom reduce avoidable context. Delegation and independent reviews also consume tokens and can cost more for small tasks. No universal savings percentage is claimed. Helper usage fields are saved when the CLI supplies them; `tinkertom savings` measures command-output reduction, not total account billing.
+
+Role matrix: Codex parent code workers use GPT-5.6 Luna; Claude parent code workers use Sonnet. Codex-parent authorized-security rubber ducks use Claude Opus 4.6; Claude-parent authorized-security rubber ducks use `gpt-daybreak-blue-latest`. Native Claude pentest coordinators use `claude_pentest_model` by default, with explicit CLI model taking precedence over project `model`, and project `model` taking precedence over that default.
 
 Model references: [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna), [Claude model configuration](https://code.claude.com/docs/en/model-config). Availability depends on the signed-in CLI account.
