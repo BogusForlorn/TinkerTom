@@ -224,11 +224,14 @@ by the supervisor. Never claim completion just to stop the loop.
                                TINKERTOM_MANAGED="1", TINKERTOM_PROVIDER=config.provider, TINKERTOM_RTK=str(int(config.rtk)), TINKERTOM_HEADROOM=str(int(config.headroom)))
             environment["PATH"] = str(Path(sys.executable).parent) + os.pathsep + environment.get("PATH", "")
             argv = command(config, state.get("session_id"))
-            from .native import codex_settings, mcp_config
+            from .native import claude_compaction_environment, codex_settings, mcp_config
             if config.provider == "codex":
-                argv[-1:-1] = codex_settings(self.store.workspace)
+                for key in ("ENABLE_TOOL_SEARCH", *claude_compaction_environment(config.auto_compact_tokens)):
+                    environment.pop(key, None)
+                argv[-1:-1] = codex_settings(self.store.workspace, auto_compact_tokens=config.auto_compact_tokens)
             else:
                 environment["MCP_TOOL_TIMEOUT"] = "604800000"
+                environment.update(claude_compaction_environment(config.auto_compact_tokens))
                 argv += ["--mcp-config", json.dumps({"mcpServers": {"tinkertom": mcp_config(self.store.workspace)}})]
             if config.provider == "claude" and config.claude_hook:
                 argv += ["--settings", str(settings_file(self.directory))]

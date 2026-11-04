@@ -20,11 +20,13 @@ class Config:
     verify_timeout_seconds: float = 900
     max_context_turns: int = 0
     checkpoint_chars: int = 12000
+    auto_compact_tokens: int = 130000
     rtk: bool = True
     headroom: bool = True
     claude_hook: bool = True
     beads: bool = True
     delegate_coding: bool = True
+    coordinator_edits: bool = False
     rubber_duck: bool = True
     rubber_duck_profile: str = "general"
     codex_worker_model: str = "gpt-5.6-luna"
@@ -58,11 +60,13 @@ class Config:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise ValueError(f"{name} must be a nonnegative integer")
+        if type(self.auto_compact_tokens) is not int or not 110000 <= self.auto_compact_tokens <= 150000:
+            raise ValueError("auto_compact_tokens must be an integer from 110000 through 150000")
         if self.max_failures < 1 or self.max_stalls < 1 or self.checkpoint_chars < 100:
             raise ValueError("max_failures/max_stalls must be positive; checkpoint_chars must be >= 100")
         if not isinstance(self.model, str) or not isinstance(self.executable, str):
             raise ValueError("model/executable must be strings")
-        if any(type(getattr(self, name)) is not bool for name in ("rtk", "headroom", "claude_hook", "beads", "delegate_coding", "rubber_duck", "copilot_fallback")):
+        if any(type(getattr(self, name)) is not bool for name in ("rtk", "headroom", "claude_hook", "beads", "delegate_coding", "coordinator_edits", "rubber_duck", "copilot_fallback")):
             raise ValueError("Optimizer and orchestration switches must be booleans")
         for name in ("codex_worker_model", "claude_worker_model", "codex_duck_model", "claude_duck_model",
                      "codex_security_duck_model", "claude_security_duck_model", "claude_pentest_model",

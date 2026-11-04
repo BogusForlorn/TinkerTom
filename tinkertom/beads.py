@@ -86,3 +86,19 @@ def beads_call(workspace: Path, args: dict):
     if len(output) > 24000:
         output = output[:24000] + "\n[Truncated; narrow the query or use bd show ID.]"
     return output, False
+
+
+def append_bead_notes(workspace: Path, issue_id: str, notes: str):
+    """Internal notes-only mutation; deliberately cannot change issue status."""
+    env = suite_environment()
+    binary = shutil.which("bd", path=env["PATH"])
+    if not binary:
+        raise ValueError("Beads is missing. Run scripts/install-tools.py with the suite Python.")
+    env.update(BD_NON_INTERACTIVE="1", BEADS_DIR=str(workspace / ".beads"), BEADS_ACTOR="tinkertom")
+    with local_lock(workspace, "beads.lock"):
+        result = subprocess.run([binary, "--sandbox", "--json", "update", bead_id(issue_id),
+                                 "--append-notes", text_arg({"notes": notes}, "notes")],
+                                cwd=workspace, env=env, capture_output=True, text=True, timeout=60)
+    if result.returncode:
+        raise ValueError("Beads: " + (result.stderr or result.stdout)[-3000:])
+    return result.stdout

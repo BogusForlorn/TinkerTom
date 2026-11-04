@@ -15,14 +15,15 @@ import time
 import tomllib
 
 from .codex_proxy import CodexBridge
-from .codex_proxy import COORDINATOR_POLICY
+from .codex_proxy import CLAUDE_POLICY, coordinator_context, coordinator_policy
 from .config import load_config
 from .native_state import CONTINUE, NativeState
 from .optimization import provider_environment, SUITE_ROOT
 from .storage import Store, atomic_write
 
 
-def mcp_config(workspace, config_path=None, provider=None, profile=None, helper=False, managed=False):
+def mcp_config(workspace, config_path=None, provider=None, profile=None, helper=False, managed=False,
+               tool_search=None):
     workspace = Path(workspace).resolve()
     args = ["-m", "tinkertom", "-C", str(workspace), "mcp"]
     if config_path is not None:
@@ -35,24 +36,95 @@ def mcp_config(workspace, config_path=None, provider=None, profile=None, helper=
         args.append("--__tinkertom-helper")
     if managed:
         args.append("--__tinkertom-managed")
-    return {"command": sys.executable, "args": args}
+    result = {"command": sys.executable, "args": args}
+    if provider == "claude":
+        result["env"] = {"ENABLE_TOOL_SEARCH": tool_search or "auto"}
+    return result
+
+
+def claude_tool_search_mode(extra, environment=None, workspace=None):
+    """Resolve Claude's dynamic tool-search mode without changing process env."""
+    environment = os.environ if environment is None else environment
+    mode = environment.get("ENABLE_TOOL_SEARCH")
+    for index, arg in enumerate(extra):
+        if arg == "--settings" or arg.startswith("--settings="):
+            if arg == "--settings":
+                if index + 1 >= len(extra) or extra[index + 1].startswith("-"):
+                    raise ValueError("Claude --settings requires JSON or a file path")
+                value = extra[index + 1]
+            else:
+                value = arg.split("=", 1)[1]
+                if not value:
+                    raise ValueError("Claude --settings requires JSON or a file path")
+            if value.lstrip().startswith("{"):
+                supplied = json.loads(value)
+            else:
+                path = Path(value)
+                if workspace is not None and not path.is_absolute():
+                    path = Path(workspace) / path
+                supplied = json.loads(path.read_text())
+            setting = supplied.get("env") if isinstance(supplied, dict) else None
+            if isinstance(setting, dict) and setting.get("ENABLE_TOOL_SEARCH"):
+                mode = setting["ENABLE_TOOL_SEARCH"]
+    return mode or "auto"
+
+
+def claude_compaction_environment(auto_compact_tokens):
+    """Return Claude's official compaction environment values for a token limit."""
+    return {
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "75",
+        "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str((auto_compact_tokens * 100 + 74) // 75),
+    }
+
+
+def toml_value(value):
+    """Serialize JSON-like data as an inline TOML value for ``codex -c``."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    if isinstance(value, dict):
+        return "{" + ", ".join(f"{json.dumps(str(k))} = {toml_value(v)}" for k, v in value.items()) + "}"
+    raise TypeError(f"unsupported TOML value: {type(value).__name__}")
+
+
+def user_codex_hooks():
+    """The user's configured PreToolUse groups; ``-c`` replaces the key, so keep them."""
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    try:
+        groups = tomllib.loads(path.read_text()).get("hooks", {}).get("PreToolUse", [])
+    except (OSError, ValueError):
+        return []
+    return [g for g in groups if isinstance(g, dict)] if isinstance(groups, list) else []
 
 
 def codex_settings(workspace, config_path=None, provider=None, profile=None, helper=False, managed=False,
-                   auto_approve=False):
+                   auto_approve=False, auto_compact_tokens=None):
     server = mcp_config(workspace, config_path, provider, profile, helper, managed)
     settings = ["-c", "mcp_servers.tinkertom.command=" + json.dumps(server["command"]),
             "-c", "mcp_servers.tinkertom.args=" + json.dumps(server["args"]),
             "-c", "mcp_servers.tinkertom.tool_timeout_sec=604800"]
+    hook = shlex.join([sys.executable, "-m", "tinkertom.hooks"])
+    group = {"matcher": "^Bash$", "hooks": [{"type": "command", "command": hook, "timeout": 5,
+                                              "statusMessage": "Checking TinkerTom command policy"}]}
+    settings += ["-c", "hooks.PreToolUse=" + toml_value(user_codex_hooks() + [group])]
     if auto_approve:
         settings += ["-c", 'mcp_servers.tinkertom.default_tools_approval_mode="approve"']
+    if auto_compact_tokens is not None:
+        settings += ["-c", f"model_auto_compact_token_limit={auto_compact_tokens}",
+                     "-c", 'model_auto_compact_token_limit_scope="total"']
     return settings
 
 
 def claude_settings(directory, workspace, config, extra, config_path=None, provider=None, profile=None,
-                    helper=False, managed=False):
+                    helper=False, managed=False, tool_search=None):
     """Combine explicit --settings hooks without editing provider files."""
     settings, forwarded = {}, []
+    tool_search = tool_search or claude_tool_search_mode(extra, workspace=workspace)
     iterator = iter(extra)
     for arg in iterator:
         if arg == "--settings" or arg.startswith("--settings="):
@@ -70,10 +142,14 @@ def claude_settings(directory, workspace, config, extra, config_path=None, provi
             settings.update(supplied)
         else:
             forwarded.append(arg)
+    if not isinstance(settings.get("env"), dict):
+        settings["env"] = {}
+    settings["env"]["ENABLE_TOOL_SEARCH"] = tool_search
+    settings["env"]["TINKERTOM_COMMAND_COMPRESSION"] = "1" if config.claude_hook else "0"
+    settings["env"].update(claude_compaction_environment(config.auto_compact_tokens))
     invocation = shlex.join([sys.executable, "-m", "tinkertom.native_hooks"])
-    events = ["SessionStart", "UserPromptSubmit", "StopFailure", "Stop"]
-    if config.claude_hook:
-        events.append("PreToolUse")
+    events = ["SessionStart", "UserPromptSubmit", "StopFailure", "Stop", "PostCompact"]
+    events.append("PreToolUse")
     for kind in events:
         group = {"hooks": [{"type": "command", "command": invocation, "timeout": 5}]}
         if kind == "PreToolUse":
@@ -83,7 +159,7 @@ def claude_settings(directory, workspace, config, extra, config_path=None, provi
     atomic_write(path, json.dumps(settings))
     mcp = directory / "mcp.json"
     atomic_write(mcp, json.dumps({"mcpServers": {"tinkertom": {"type": "stdio", **mcp_config(
-        workspace, config_path, provider, profile, helper, managed)}}}))
+        workspace, config_path, provider, profile, helper, managed, tool_search)}}}))
     return ["--settings", str(path), "--mcp-config", str(mcp)], forwarded
 
 
@@ -103,6 +179,16 @@ def native_profile_args(extra):
     if extra and extra[0] == "pentest":
         return "authorized_security", extra[1:]
     return "general", extra
+
+
+def coordinator_edit_args(extra):
+    """Consume TinkerTom's native opt-in without forwarding it to a provider."""
+    extra = list(extra)
+    separator = extra.index("--") if "--" in extra else len(extra)
+    enabled = "--tt-coordinator-edits" in extra[:separator]
+    extra = [arg for index, arg in enumerate(extra)
+             if arg != "--tt-coordinator-edits" or index >= separator]
+    return enabled, extra
 
 
 def claude_model_override(extra):
@@ -162,7 +248,8 @@ async def codex_ui(executable, extra, workspace, config, env, state, lease_fd):
     policy = codex_start_permissions(config, extra)
     settings = codex_settings(workspace, state.directory / "config.json", "codex",
                                config.rubber_duck_profile, managed=True,
-                               auto_approve=bool(policy and policy.get("approvalPolicy") == "never"))
+                               auto_approve=bool(policy and policy.get("approvalPolicy") == "never"),
+                               auto_compact_tokens=config.auto_compact_tokens)
     if policy and "approvalPolicy" in policy:
         settings += ["-c", 'approval_policy="never"', "-c", 'sandbox_mode="' + policy["sandbox"] + '"']
     saved = state.read()
@@ -208,9 +295,13 @@ async def codex_ui(executable, extra, workspace, config, env, state, lease_fd):
 
 
 def claude_ui(executable, extra, workspace, config, env, state, lease_fd):
+    tool_search = claude_tool_search_mode(extra, env, workspace)
+    env = dict(env)
+    env["ENABLE_TOOL_SEARCH"] = tool_search
     settings, forwarded = claude_settings(state.directory, workspace, config, extra,
                                           state.directory / "config.json", "claude",
-                                          config.rubber_duck_profile, managed=True)
+                                          config.rubber_duck_profile, managed=True,
+                                          tool_search=tool_search)
     flags = ["--dangerously-skip-permissions"] if config.permissions == "yolo" else []
     explicit_model = claude_model_override(forwarded)
     selected_model = config.model
@@ -219,9 +310,10 @@ def claude_ui(executable, extra, workspace, config, env, state, lease_fd):
     if not explicit_model and selected_model:
         flags += ["--model", selected_model]
     if config.rubber_duck_profile in {"general", "authorized_security"}:
-        flags += ["--append-system-prompt", COORDINATOR_POLICY,
+        policy = coordinator_policy(config.coordinator_edits)
+        flags += ["--append-system-prompt", policy + CLAUDE_POLICY,
                   "--system-prompt-snapshot", "off",
-                  "--disallowedTools", "Edit,Write,NotebookEdit,Bash"]
+                  "--disallowedTools", "Bash" if config.coordinator_edits else "Edit,Write,NotebookEdit,Bash"]
     base = [executable, *flags]
     saved = state.read()
     if not forwarded and saved.get("status") in {"waiting", "resuming"} and saved.get("session_id"):
@@ -261,6 +353,9 @@ def run_native(workspace: Path, provider: str, extra: list[str]) -> int:
         raise ValueError("A managed agent cannot recursively open a native supervisor")
     profile, extra = native_profile_args(extra)
     changes = {"provider": provider, "rubber_duck_profile": profile}
+    coordinator_edits, extra = coordinator_edit_args(extra)
+    if coordinator_edits:
+        changes["coordinator_edits"] = True
     path = workspace / "tinkertom.toml"
     # Keep Claude's historical config-less YOLO default. Codex now has its own
     # never/workspace-write default and must not change Claude launch behavior.
@@ -301,9 +396,11 @@ def run_native(workspace: Path, provider: str, extra: list[str]) -> int:
                    TINKERTOM_RTK=str(int(config.rtk)), TINKERTOM_HEADROOM=str(int(config.headroom)))
         if provider == "claude":
             env["MCP_TOOL_TIMEOUT"] = "604800000"
-            # Claude's built-in tool search can hide the preloaded TinkerTom
-            # MCP tools. Scope this only to the native Claude child.
-            env["ENABLE_TOOL_SEARCH"] = "false"
+            env["ENABLE_TOOL_SEARCH"] = claude_tool_search_mode(extra, env, workspace)
+            env.update(claude_compaction_environment(config.auto_compact_tokens))
+        else:
+            for key in ("ENABLE_TOOL_SEARCH", *claude_compaction_environment(config.auto_compact_tokens)):
+                env.pop(key, None)
         env["PYTHONPATH"] = str(SUITE_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
         terminal = termios.tcgetattr(sys.stdin.fileno())
         old = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}

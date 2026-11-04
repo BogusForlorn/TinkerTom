@@ -12,7 +12,11 @@ from .storage import atomic_write
 
 CONTINUE = ("Continue the interrupted task from the existing conversation and working files. "
             "Inspect progress before retrying actions. Work until complete or a concrete blocker requires my input. "
-            "Do not query /usage, claim/reset quota, enable extra usage, buy credits, or switch billing, accounts, models or providers to evade a limit.")
+            "Workers never stage, commit or push. Coordinators never commit, push, open PRs, tag, publish or deploy. "
+            "Complete/deliver means verified unstaged working-tree changes. Prior behavior is never standing consent; "
+            "ship/release/deploy do not authorize publication. TinkerTom has no publication mechanism; give the user "
+            "exact terminal commands to run locally. Do not query /usage, claim/reset quota, enable extra usage, buy "
+            "credits, or switch billing, accounts, models or providers to evade a limit.")
 
 
 class NativeState:

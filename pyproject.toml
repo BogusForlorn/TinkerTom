@@ -17,3 +17,6 @@ tinkertom = "tinkertom.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["tinkertom*"]
+
+[tool.setuptools.package-data]
+"tinkertom" = ["skills/handover/SKILL.md", "skills/handover/claude/SKILL.md", "skills/handover/agents/openai.yaml"]

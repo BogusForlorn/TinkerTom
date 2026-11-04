@@ -9,6 +9,8 @@ import sys
 
 from .compact import compact
 from .navigation import read_file, symbols
+from .publication import publication_denial
+from .handover import active_marker, handover_call
 
 
 def _closed(value, allowed, name):
@@ -89,12 +91,24 @@ TOOLS = [
          "key": {"type": "string", "description": "Memory key: remember stores/updates it; recall fetches it. Recall without a key lists memories."},
          "limit": {"type": "integer", "minimum": 1, "maximum": 100}},
          "required": ["action"], "additionalProperties": False}},
+    {"name": "handover", "description": "Begin, finalize or abort a provider-scoped coordinator handover.",
+     "inputSchema": {"type": "object", "properties": {
+         "action": {"type": "string", "enum": ["begin", "finalize", "abort"]},
+         "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+         "checkpoint": {"type": "string"}, "bead_id": {"type": "string"}, "notes": {"type": "string", "maxLength": 16000}},
+         "required": ["action"], "additionalProperties": False}},
 ]
 
 
 def call(name: str, args: dict, workspace: Path) -> tuple[str, bool]:
+    provider = os.environ.get("TINKERTOM_PROVIDER")
+    marker = active_marker(workspace, provider)
+    if marker and (name == "code_worker" or (name == "beads" and args.get("action") not in {"ready", "list", "show", "recall"})):
+        raise ValueError("Current provider has an active handover; mutation is temporarily unavailable")
     if name not in {tool["name"] for tool in available_tools(workspace)}:
         raise ValueError(f"Tool is unavailable in this role/configuration: {name}")
+    if name == "handover":
+        return handover_call(workspace, args)
     if name in {"rubber_duck", "code_worker"}:
         from .agents import agent_call
         return agent_call(name, args, workspace)
@@ -109,6 +123,10 @@ def call(name: str, args: dict, workspace: Path) -> tuple[str, bool]:
             raise ValueError("command must be nonempty")
         if type(args.get("raw", False)) is not bool:
             raise ValueError("raw must be a boolean")
+        if os.environ.get("TINKERTOM_MANAGED") == "1":
+            denial = publication_denial(args["command"])
+            if denial:
+                raise ValueError(denial)
         with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             code = compact([], workspace, limit, timeout, shell=args["command"], raw=args.get("raw", False),
                            use_rtk=os.environ.get("TINKERTOM_RTK", "1") == "1",
@@ -141,6 +159,8 @@ def available_tools(workspace):
     from .agents import active_config
     config = active_config(workspace)
     disabled = set()
+    if os.environ.get("TINKERTOM_HELPER"):
+        disabled.add("handover")
     if not config.beads:
         disabled.add("beads")
     if not config.rubber_duck or os.environ.get("TINKERTOM_HELPER"):

@@ -10,11 +10,31 @@ import uuid
 
 from .native_state import CONTINUE, schedule, wait_message
 from .providers import reset_time
+from .handover import handover_context
 
 
 COORDINATOR_POLICY = """
 You are the coordinating and reviewing model for this TinkerTom session. Implementation changes go through the code_worker MCP tool with a bounded task and explicit file scope. The main coordinator plans, reviews worker diffs, requests worker corrections, runs acceptance checks, and delivers the result.
 Do not directly edit source files or use TinkerTom's run tool or shell commands to rewrite source as a delegation bypass. TinkerTom run is for diagnostics, tests, and git inspection only. Do not retain or invent a small-direct-edit exception. TinkerTom MCP read, symbols, run, rubber_duck, code_worker, and related tools remain available.
+Never commit, push, open PRs, tag, publish or deploy. Workers never stage/commit/push. Complete/deliver means verified unstaged working-tree changes; ambiguous ship/release/deploy language is not authorization. TinkerTom has no publication mechanism: provide exact terminal commands for the user to run locally.
+"""
+
+COORDINATOR_EDIT_POLICY = """
+Coordinator-edit mode is explicitly enabled for this native session. You may use provider-native editing tools directly when useful, while substantial changes should preferably go through a bounded code_worker task with explicit file scope. Review diffs and run acceptance checks before delivering.
+Never commit, push, open PRs, tag, publish or deploy. Workers never stage/commit/push. Complete/deliver means verified unstaged working-tree changes; ambiguous ship/release/deploy language is not authorization. TinkerTom has no publication mechanism: provide exact terminal commands for the user to run locally.
+"""
+
+
+def coordinator_policy(coordinator_edits=False):
+    """Return the policy selected for this native session."""
+    return COORDINATOR_EDIT_POLICY if coordinator_edits else COORDINATOR_POLICY
+
+
+def coordinator_context(coordinator_edits=False):
+    return INSTRUCTIONS + coordinator_policy(coordinator_edits)
+
+CLAUDE_POLICY = """
+Claude-native integration policy: TinkerTom MCP tools may be deferred until they are needed. If they are visible, call them directly; otherwise use ToolSearch to discover mcp__tinkertom__read, mcp__tinkertom__symbols, mcp__tinkertom__run, mcp__tinkertom__code_worker, mcp__tinkertom__rubber_duck, mcp__tinkertom__beads, and mcp__tinkertom__handover. Rediscover these tools after resume or compaction. Use code_worker for implementation and let the TinkerTom configuration choose its smaller model.
 """
 
 INSTRUCTIONS = """
@@ -22,7 +42,7 @@ The user authorizes TinkerTom’s rubber-duck tool to send relevant repository s
 TinkerTom local suite is available through the tinkertom MCP server.
 Prefer its run tool for verbose commands: RTK -> deduplication -> local Headroom -> bounded preview, with saved logs and exit status. Use focused read/symbols tools. Inspect raw logs when exact output matters. Avoid repeating full-file reads and unchanged context; retain native compaction and session history.
 Work autonomously on the user's current coding task until complete or a concrete blocker needs input. Keep brief milestone/recovery notes in .tinkertom/checkpoint.md for long tasks; inspect working files before retrying interrupted actions.
-""" + COORDINATOR_POLICY + """
+""" + """
 Use rubber_duck to challenge significant plans, uncertain assumptions or consequential changes before finalizing. Supply a concise proposal and evidence; evaluate the critique rather than treating another model as ground truth. It uses the opposite provider's CLI. Avoid repeatedly asking for identical critiques; results are cached.
 Use beads to track multi-step work, dependencies and durable discoveries. Check ready tasks/memory after compaction or resuming; create and claim bounded tasks, record progress/blockers, and close them only after review and verification. Don't create new beads for trivial chat. Long helper calls can wait through quota resets without polling; cancel the tool if the user cancels the work. Never recursively delegate from a helper.
 Quota recovery is handled outside the model. Do not query /usage, /usage-credits or /extra-usage, claim/reset quota, purchase credits, enable overage, or switch billing/accounts/models/providers to bypass limits. Follow direct user instructions about their task and stop when they cancel it."""
@@ -101,7 +121,7 @@ class CodexBridge:
                 context = params.setdefault("additionalContext", {})
                 if context is None:
                     context = params["additionalContext"] = {}
-                context["tinkertom"] = {"kind": "application", "value": INSTRUCTIONS}
+                context["tinkertom"] = {"kind": "application", "value": coordinator_context(self.config.coordinator_edits) + handover_context(self.workspace, "codex")}
                 message["params"] = params
         return None
 
@@ -185,7 +205,8 @@ class CodexBridge:
             self.busy = True
             return {"id": identifier, "method": "turn/start", "params": {
                 "threadId": self.active, "input": inputs,
-                "additionalContext": {"tinkertom": {"kind": "application", "value": INSTRUCTIONS}}}}
+                "additionalContext": {"tinkertom": {"kind": "application",
+                "value": coordinator_context(self.config.coordinator_edits) + handover_context(self.workspace, "codex")}}}}
 
     async def handle(self, websocket):
         from websockets.asyncio.client import unix_connect

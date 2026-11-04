@@ -1,3 +1,4 @@
+from dataclasses import replace
 import asyncio
 from datetime import datetime
 import json
@@ -16,10 +17,10 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from tinkertom.cli import main
-from tinkertom.codex_proxy import CodexBridge, exhausted_windows
+from tinkertom.codex_proxy import COORDINATOR_EDIT_POLICY, COORDINATOR_POLICY, CodexBridge, exhausted_windows
 from tinkertom.config import Config
-from tinkertom.mcp import response
-from tinkertom.native import claude_settings, claude_ui, codex_settings, codex_ui, codex_start_permissions, mcp_config, native_profile_args, run_native
+from tinkertom.mcp import TOOLS, response
+from tinkertom.native import claude_compaction_environment, claude_settings, claude_tool_search_mode, claude_ui, codex_settings, codex_ui, codex_start_permissions, coordinator_edit_args, mcp_config, native_profile_args, run_native
 from tinkertom.native_hooks import handle
 from tinkertom.native_state import NativeState, schedule
 from tinkertom.optimization import suite_environment
@@ -47,7 +48,45 @@ class NativeTests(unittest.TestCase):
                 run.assert_called_with(self.workspace, provider, ['--', 'pentest', '--model', 'example'])
             self.assertEqual(main(['-C', str(self.workspace)]), 0)
             run.assert_called_with(self.workspace, 'codex', [])
+            self.assertEqual(main(['-C', str(self.workspace), provider, '--tt-coordinator-edits', '--model', 'example']), 0)
+            run.assert_called_with(self.workspace, provider, ['--tt-coordinator-edits', '--model', 'example'])
 
+    def test_coordinator_policy_defaults_strict_and_opt_in_is_consumed(self):
+        self.assertFalse(self.config.coordinator_edits)
+        self.assertIn('code_worker', COORDINATOR_POLICY)
+        self.assertIn('Do not directly edit source', COORDINATOR_POLICY)
+        self.assertIn('provider-native editing tools directly', COORDINATOR_EDIT_POLICY)
+        self.assertEqual(coordinator_edit_args(['--tt-coordinator-edits', '--model', 'x']),
+                         (True, ['--model', 'x']))
+        self.assertEqual(coordinator_edit_args(['--model', 'x']), (False, ['--model', 'x']))
+        self.assertEqual(coordinator_edit_args(['--', '--tt-coordinator-edits']),
+                         (False, ['--', '--tt-coordinator-edits']))
+        strict = handle({'session_id': 'strict', 'hook_event_name': 'SessionStart'},
+                        NativeState(self.workspace / '.tinkertom/native/claude'), self.config)
+        self.assertIn('Do not directly edit source', strict['hookSpecificOutput']['additionalContext'])
+        flexible = replace(self.config, coordinator_edits=True)
+        edit = handle({'session_id': 'edit', 'hook_event_name': 'SessionStart'},
+                      NativeState(self.workspace / '.tinkertom/native/claude-edit'), flexible)
+        context = edit['hookSpecificOutput']['additionalContext']
+        self.assertIn('provider-native editing tools directly', context)
+        self.assertNotIn('Do not directly edit source files', context)
+        bridge = CodexBridge([], self.workspace, {}, self.state,
+                             replace(self.config, coordinator_edits=True))
+        turn = {'id': 1, 'method': 'turn/start', 'params': {'threadId': 's', 'input': []}}
+        bridge.incoming(turn)
+        self.assertIn('provider-native editing tools directly',
+                      turn['params']['additionalContext']['tinkertom']['value'])
+
+    def test_claude_edit_mode_allows_built_in_edit_tools_but_keeps_bash_guard(self):
+        flags, _ = claude_settings(self.state.directory, self.workspace,
+                                    replace(self.config, coordinator_edits=True), [])
+        self.assertTrue(Path(flags[1]).exists())
+        with patch('tinkertom.native.subprocess.Popen', return_value=SimpleNamespace(returncode=0, poll=lambda: 0)), \
+                patch('tinkertom.native.termios.tcgetattr', return_value=[]), \
+                patch('tinkertom.native.termios.tcsetattr'), \
+                patch('tinkertom.native.sys.stdin.fileno', return_value=0):
+            claude_ui('claude', [], self.workspace, replace(self.config, coordinator_edits=True), {},
+                      NativeState(self.workspace / '.tinkertom/native/claude-edit-ui'), 0)
     def test_native_profile_modes_strip_only_exact_leading_pentest(self):
         for provider in ('codex', 'claude'):
             with self.subTest(provider=provider):
@@ -236,6 +275,95 @@ class NativeTests(unittest.TestCase):
         handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
         self.assertEqual(state.read()['next_run_at'], first)
 
+    def test_claude_postcompact_recovers_stale_wait_without_restart(self):
+        state = NativeState(self.workspace / '.tinkertom/native/claude-postcompact')
+        event = {'session_id': 'claude-exact'}
+        handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
+        with state.edit() as data:
+            data.update(status='waiting', detected_at=10, next_run_at=200,
+                        pending_prompts=[])
+        handle({**event, 'hook_event_name': 'PostCompact', 'trigger': 'manual'}, state, self.config)
+        saved = state.read()
+        self.assertEqual(saved, {'session_id': 'claude-exact', 'status': 'ready', 'pending_prompts': []})
+
+    def test_claude_postcompact_queues_due_now_and_is_idempotent(self):
+        state = NativeState(self.workspace / '.tinkertom/native/claude-postcompact-queue')
+        event = {'session_id': 'claude-exact'}
+        handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
+        with state.edit() as data:
+            data.update(status='waiting', detected_at=10, next_run_at=200,
+                        pending_prompts=['follow up'])
+        with patch('tinkertom.native_hooks.time.time', return_value=300):
+            handle({**event, 'hook_event_name': 'PostCompact'}, state, self.config)
+        first = state.read()
+        self.assertEqual(first['next_run_at'], 300)
+        self.assertEqual(first['pending_prompts'], ['follow up'])
+        with patch('tinkertom.native_hooks.time.time', return_value=400):
+            handle({**event, 'hook_event_name': 'PostCompact'}, state, self.config)
+        self.assertEqual(state.read(), first)
+
+    def test_claude_postcompact_and_stopfailure_ignore_invalid_scope(self):
+        state = NativeState(self.workspace / '.tinkertom/native/claude-recovery-guards')
+        event = {'session_id': 'claude-exact'}
+        handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
+        with state.edit() as data:
+            data.update(status='waiting', detected_at=10, next_run_at=200,
+                        pending_prompts=['keep'])
+        for candidate in ({'hook_event_name': 'PostCompact', 'session_id': 'other'},
+                          {'hook_event_name': 'PostCompact'},
+                          {'hook_event_name': 'PostCompact', **event, 'agent_id': 'subagent'}):
+            before = state.read()
+            handle(candidate, state, self.config)
+            self.assertEqual(state.read(), before)
+
+        for status in ('ready', 'resuming'):
+            with state.edit() as data:
+                data.update(status=status, detected_at=10, next_run_at=200,
+                            pending_prompts=['keep'])
+            before = state.read()
+            handle({**event, 'hook_event_name': 'PostCompact'}, state, self.config)
+            self.assertEqual(state.read(), before)
+
+        for agent_id in (None, ''):
+            with state.edit() as data:
+                data.update(status='waiting', detected_at=10, next_run_at=200,
+                            pending_prompts=[])
+            handle({**event, 'hook_event_name': 'PostCompact', 'agent_id': agent_id}, state, self.config)
+            self.assertEqual(state.read(), {'session_id': event['session_id'], 'status': 'ready', 'pending_prompts': []})
+
+        with state.edit() as data:
+            data.update(status='waiting', pending_prompts=[])
+        handle({**event, 'hook_event_name': 'StopFailure', 'error': 'invalid_request'}, state, self.config)
+        self.assertEqual(state.read(), {'session_id': event['session_id'], 'status': 'ready', 'pending_prompts': []})
+        with patch('tinkertom.native_state.time.time', return_value=100):
+            handle({**event, 'hook_event_name': 'StopFailure', 'error': 'rate_limit'}, state, self.config)
+        self.assertEqual(state.read()['status'], 'waiting')
+        self.assertGreater(state.read()['next_run_at'], 100)
+
+    def test_claude_nonrate_stopfailure_never_drops_queued_prompts(self):
+        state = NativeState(self.workspace / '.tinkertom/native/claude-recovery-queue')
+        event = {'session_id': 'claude-exact'}
+        handle({**event, 'hook_event_name': 'SessionStart'}, state, self.config)
+        with state.edit() as data:
+            data.update(status='resuming', detected_at=10, next_run_at=200,
+                        pending_prompts=['keep'])
+        handle({**event, 'hook_event_name': 'StopFailure', 'error': 'invalid_request'}, state, self.config)
+        self.assertEqual(state.read()['status'], 'resuming')
+        self.assertEqual(state.read()['pending_prompts'], ['keep'])
+
+    def test_claude_postcompact_preserves_custom_hooks_and_is_registered(self):
+        settings = {
+            'env': {'ENABLE_TOOL_SEARCH': 'false'},
+            'hooks': {'PostCompact': [{'hooks': [{'type': 'command', 'command': 'custom-hook'}]}]},
+        }
+        flags, _ = claude_settings(self.state.directory, self.workspace, self.config,
+                                    ['--settings', json.dumps(settings)], tool_search='false')
+        written = json.loads(Path(flags[1]).read_text())
+        standard_events = {'SessionStart', 'UserPromptSubmit', 'StopFailure', 'Stop', 'PostCompact', 'PreToolUse'}
+        self.assertTrue(standard_events <= written['hooks'].keys())
+        self.assertEqual(len(written['hooks']['PostCompact']), 2)
+        self.assertEqual(written['env']['ENABLE_TOOL_SEARCH'], 'false')
+
     def test_claude_hook_uses_only_displayed_reset_error_fields(self):
         zone = ZoneInfo('Asia/Singapore')
         now = datetime(2026, 10, 6, 13, 50, tzinfo=zone).timestamp()
@@ -265,6 +393,92 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(written['theme'], 'dark')
         self.assertEqual(len(written['hooks']['PreToolUse']), 2)
         self.assertEqual(rest, ['--model', 'custom'])
+
+    def test_claude_tool_search_mode_and_mcp_env_precedence(self):
+        for value in ('true', 'false', 'auto'):
+            self.assertEqual(claude_tool_search_mode([], {'ENABLE_TOOL_SEARCH': value}), value)
+        self.assertEqual(claude_tool_search_mode([], {}), 'auto')
+        settings = json.dumps({'env': {'ENABLE_TOOL_SEARCH': 'false'}})
+        self.assertEqual(claude_tool_search_mode(['--settings', settings], {'ENABLE_TOOL_SEARCH': 'true'}), 'false')
+        self.assertEqual(claude_tool_search_mode(['--settings', json.dumps({'env': {'ENABLE_TOOL_SEARCH': ''}})],
+                                                  {'ENABLE_TOOL_SEARCH': 'true'}), 'true')
+        flags, _ = claude_settings(self.state.directory, self.workspace, self.config,
+                                    ['--settings', settings], provider='claude')
+        mcp_path = Path(flags[flags.index('--mcp-config') + 1])
+        generated = json.loads(mcp_path.read_text())['mcpServers']['tinkertom']
+        self.assertEqual(generated['env']['ENABLE_TOOL_SEARCH'], 'false')
+
+    def test_claude_tool_search_settings_errors_and_relative_files(self):
+        with self.assertRaisesRegex(ValueError, r'--settings requires'):
+            claude_tool_search_mode(['--settings', '--model'], {})
+        with self.assertRaisesRegex(ValueError, r'--settings requires'):
+            claude_settings(self.state.directory, self.workspace, self.config,
+                            ['--settings', '--model'])
+        settings_path = self.workspace / 'claude-settings.json'
+        settings_path.write_text(json.dumps({'env': {'ENABLE_TOOL_SEARCH': 'true'}}))
+        self.assertEqual(claude_tool_search_mode(['--settings', settings_path.name], {}, self.workspace), 'true')
+
+    def test_claude_session_context_is_dynamic_and_codex_instructions_are_not(self):
+        start = handle({'session_id': 'claude', 'hook_event_name': 'SessionStart'},
+                       NativeState(self.workspace / '.tinkertom/native/claude'), self.config)
+        context = start['hookSpecificOutput']['additionalContext']
+        self.assertIn('ToolSearch', context)
+        policy_tools = {'read', 'symbols', 'run', 'code_worker', 'rubber_duck', 'beads', 'handover'}
+        registered_tools = {tool['name'] for tool in TOOLS}
+        self.assertTrue(policy_tools <= registered_tools)
+        for name in policy_tools:
+            self.assertIn(f'mcp__tinkertom__{name}', context)
+        from tinkertom.codex_proxy import INSTRUCTIONS
+        self.assertNotIn('ToolSearch', INSTRUCTIONS)
+
+    def test_provider_handover_context_is_injected_only_for_targets(self):
+        marker = self.workspace / '.tinkertom'
+        marker.mkdir(exist_ok=True)
+        (marker / 'handover.json').write_text(json.dumps({
+            'provider': 'codex', 'source': 'codex', 'target': 'claude',
+            'state': 'completed', 'expires_at': time.time() + 1000,
+        }))
+        (marker / 'checkpoint.md').write_text('target checkpoint')
+        claude = handle({'session_id': 'target', 'hook_event_name': 'SessionStart'},
+                        NativeState(self.workspace / '.tinkertom/native/claude'), self.config)
+        self.assertIn('target checkpoint', claude['hookSpecificOutput']['additionalContext'])
+        codex = self.bridge
+        turn = {'id': 'handover-turn', 'method': 'turn/start', 'params': {'threadId': 'exact-session', 'input': []}}
+        codex.incoming(turn)
+        self.assertNotIn('target checkpoint', turn['params']['additionalContext']['tinkertom']['value'])
+        (marker / 'handover.json').write_text(json.dumps({
+            'provider': 'claude', 'source': 'claude', 'target': 'codex',
+            'state': 'completed', 'expires_at': time.time() + 1000,
+        }))
+        with self.state.edit() as data:
+            data.update(status='waiting', session_id='exact-session', next_run_at=0, pending_input=[])
+        retry = codex.retry(1)
+        self.assertIn('target checkpoint', retry['params']['additionalContext']['tinkertom']['value'])
+
+    def test_compaction_values_and_provider_scopes_are_exact(self):
+        self.assertEqual(claude_compaction_environment(110000), {
+            'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE': '75',
+            'CLAUDE_CODE_AUTO_COMPACT_WINDOW': '146667',
+        })
+        settings, _ = claude_settings(self.state.directory, self.workspace,
+                                       Config(auto_compact_tokens=130000).validate(),
+                                       ['--settings', json.dumps({'env': {'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE': '1'}})])
+        env = json.loads(Path(settings[1]).read_text())['env']
+        self.assertEqual(env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE'], '75')
+        self.assertEqual(env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'], '173334')
+        codex = codex_settings(self.workspace, auto_compact_tokens=150000)
+        self.assertIn('model_auto_compact_token_limit=150000', codex)
+        self.assertIn('model_auto_compact_token_limit_scope="total"', codex)
+        self.assertNotIn('CLAUDE_CODE_AUTO_COMPACT_WINDOW', json.dumps(codex))
+
+    def test_auto_compact_token_validation_is_strict_and_bounded(self):
+        for value in (110000, 130000, 150000):
+            with self.subTest(value=value):
+                self.assertEqual(Config(auto_compact_tokens=value).validate().auto_compact_tokens, value)
+        for value in (True, False, 130000.0, '130000', 109999, 150001):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    Config(auto_compact_tokens=value).validate()
 
     def test_claude_coordinator_argv_model_precedence_and_policy(self):
         cases = [
@@ -319,6 +533,33 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(Path(relative['args'][relative['args'].index('-C') + 1]), Path.cwd())
         config_arg = relative['args'][relative['args'].index('--__tinkertom-config') + 1]
         self.assertTrue(Path(config_arg).is_absolute())
+
+    def test_codex_pretooluse_hook_is_valid_nested_toml_and_preserves_user_hooks(self):
+        import tomllib
+        home = self.workspace / 'codex-home'
+        home.mkdir()
+        (home / 'config.toml').write_text(
+            '[[hooks.PreToolUse]]\nmatcher = "^Edit$"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "user-hook"\n')
+        with patch.dict(os.environ, {'CODEX_HOME': str(home)}):
+            args = codex_settings(self.workspace)
+        value = next(a for a in args if a.startswith('hooks.PreToolUse='))
+        groups = tomllib.loads(value)['hooks']['PreToolUse']
+        self.assertEqual(groups[0]['hooks'][0]['command'], 'user-hook')
+        group = groups[-1]
+        self.assertEqual(group['matcher'], '^Bash$')
+        hook = group['hooks'][0]
+        self.assertEqual((hook['type'], hook['timeout']), ('command', 5))
+        self.assertIn('tinkertom.hooks', hook['command'])
+        self.assertTrue(hook['statusMessage'])
+        self.assertFalse(any('trust' in a.lower() for a in args))
+
+    def test_command_compression_flag_is_explicit_and_safety_hook_stays(self):
+        for enabled in (True, False):
+            config = replace(self.config, claude_hook=enabled)
+            flags, _ = claude_settings(self.state.directory, self.workspace, config, [], tool_search='auto')
+            written = json.loads(Path(flags[1]).read_text())
+            self.assertEqual(written['env']['TINKERTOM_COMMAND_COMPRESSION'], '1' if enabled else '0')
+            self.assertEqual(written['hooks']['PreToolUse'][-1]['matcher'], 'Bash')
 
     def test_codex_mcp_auto_approval_is_opt_in_and_exact(self):
         default = codex_settings(self.workspace)
@@ -528,12 +769,13 @@ class NativeTerminalTests(unittest.TestCase):
                     self.assertNotIn('-p', calls[0]['argv'])
                     for call in calls:
                         self.assertIn('--dangerously-skip-permissions', call['argv'])
-                        self.assertEqual(call['tool_search'], 'false')
+                        self.assertEqual(call['tool_search'], calls[0]['tool_search'])
                         self.assertEqual(call['argv'][call['argv'].index('--system-prompt-snapshot') + 1], 'off')
                         self.assertEqual(call['argv'][call['argv'].index('--disallowedTools') + 1],
                                          'Edit,Write,NotebookEdit,Bash')
                         if os.geteuid() == 0:
                             self.assertEqual(call['is_sandbox'], '1')
+                    self.assertEqual([call['tool_search'] for call in calls], ['auto', 'auto'])
                 finally:
                     if proc.poll() is None:
                         proc.terminate()

@@ -36,6 +36,7 @@ headroom = true                    # local output compression, no API proxy
 claude_hook = true                 # optimize simple Bash tool calls automatically
 beads = true                       # persistent local tasks, dependencies and memory
 delegate_coding = true             # smaller-model CLI implementation workers
+coordinator_edits = false          # native coordinator may edit directly only when explicitly enabled
 rubber_duck = true                 # opposite-provider CLI review
 rubber_duck_profile = "general"   # general or authorized_security
 codex_worker_model = "gpt-5.6-luna"
@@ -73,6 +74,7 @@ def parser():
     sub = cli.add_subparsers(dest="command", required=True)
     for provider in ("codex", "claude"):
         native = sub.add_parser(provider, add_help=False, help=f"Open the native {provider} UI with the TinkerTom suite")
+        native.add_argument("--tt-coordinator-edits", action="store_true", help=argparse.SUPPRESS)
         native.add_argument("provider_args", nargs=argparse.REMAINDER)
     mcp = sub.add_parser("mcp", help="Serve compression, coding workers, rubber duck and Beads over MCP stdio")
     # Private flags are emitted only in provider-generated registrations. They
@@ -186,7 +188,7 @@ def doctor(workspace: Path) -> dict:
     checks["native_ui"] = {"commands": ["tinkertom codex", "tinkertom claude"],
                            "codex": "local app-server bridge; tested with 0.153.4 and 0.154.0; native permissions set on private backend (experimental protocol)",
                            "claude": "requires StopFailure lifecycle hook; local fixture tests only",
-                           "mcp": "per-invocation run/read/symbols/wait_status/rubber_duck/code_worker/beads tools",
+                           "mcp": "per-invocation run/read/symbols/wait_status/rubber_duck/code_worker/beads/handover tools",
                            "lifetime": "keep the launcher running; use tmux for native UI detachment"}
     checks["agents"] = {"transport": "installed CLI subprocesses using existing CLI authentication",
                         "coding_workers": {"codex": config.codex_worker_model, "claude": config.claude_worker_model},

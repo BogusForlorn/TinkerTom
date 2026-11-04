@@ -101,12 +101,57 @@ class InstallerTests(unittest.TestCase):
                         patch.object(installer, 'install_python_packages') as packages, \
                         patch.object(installer.platform, 'mac_ver', return_value=('26.0', (), '')), \
                         patch.object(installer, 'write_launcher'), \
+                        patch.object(installer, 'install_handover_skill'), \
                         patch.object(installer, 'configure_shell'), contextlib.redirect_stdout(io.StringIO()):
                     installer.main(['--platform', target])
                 self.assertEqual([c.args[0][0] for c in run.call_args_list], ['git'] * 3)
                 self.assertEqual(binary.call_args_list[0].args, (root / '.tools/bin', 'rtk', pins['rtk']['binaries'][target]))
                 self.assertEqual(binary.call_args_list[1].args, (root / '.tools/bin', 'bd', pins['beads']['binaries'][target]))
                 packages.assert_called_once_with(pins, False)
+
+    def test_handover_skill_installs_distinct_managed_provider_files_idempotently(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            codex_home, claude_home = root / 'codex', root / 'claude'
+            with patch.dict(os.environ, {'CODEX_HOME': str(codex_home), 'CLAUDE_CONFIG_DIR': str(claude_home)}, clear=False):
+                installer.install_handover_skill()
+                installer.install_handover_skill()
+                codex = codex_home / 'skills/handover'
+                claude = claude_home / 'skills/handover'
+                self.assertNotIn('disable-model-invocation', (codex / 'SKILL.md').read_text())
+                self.assertIn('disable-model-invocation: true', (claude / 'SKILL.md').read_text())
+                self.assertEqual((codex / 'agents/openai.yaml').read_text(),
+                                 (ROOT / 'tinkertom/skills/handover/agents/openai.yaml').read_text())
+                self.assertEqual((codex / 'SKILL.md').read_text().splitlines()[4:],
+                                 (claude / 'SKILL.md').read_text().splitlines()[5:])
+                (codex / 'unrelated.txt').write_text('preserve')
+                installer.install_handover_skill()
+                self.assertEqual((codex / 'unrelated.txt').read_text(), 'preserve')
+
+    def test_handover_skill_rejects_unowned_and_path_conflicts(self):
+        for conflict in ('nonempty', 'marker', 'target_symlink', 'agents_symlink'):
+            with self.subTest(conflict=conflict), tempfile.TemporaryDirectory() as d:
+                root = Path(d)
+                codex_home, claude_home = root / 'codex', root / 'claude'
+                target = codex_home / 'skills/handover'
+                target.mkdir(parents=True)
+                if conflict == 'nonempty':
+                    (target / 'user.txt').write_text('owned by user')
+                elif conflict == 'marker':
+                    (target / '.tinkertom-owned').write_text('wrong\n')
+                elif conflict == 'target_symlink':
+                    real = root / 'real'
+                    real.mkdir()
+                    target.rmdir()
+                    target.symlink_to(real, target_is_directory=True)
+                elif conflict == 'agents_symlink':
+                    (target / '.tinkertom-owned').write_text(installer.HANDOVER_MARKER)
+                    real = root / 'agents-real'
+                    real.mkdir()
+                    (target / 'agents').symlink_to(real, target_is_directory=True)
+                with patch.dict(os.environ, {'CODEX_HOME': str(codex_home), 'CLAUDE_CONFIG_DIR': str(claude_home)}, clear=False):
+                    with self.assertRaises(SystemExit):
+                        installer.install_handover_skill()
 
     def test_macos_minimum_selects_build_only_on_older_releases(self):
         pin = {'minimum_macos': '26.0'}

@@ -8,6 +8,7 @@ max_failures = 5
 max_stalls = 5
 turn_timeout_seconds = 3600
 max_context_turns = 0
+auto_compact_tokens = 130000
 rtk = true
 headroom = true
 claude_hook = true

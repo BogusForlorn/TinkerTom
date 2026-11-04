@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tinkertom.agents import active_config, agent_call, helpers_waiting
+from tinkertom.agents import active_config, agent_call, git_snapshot, git_snapshot_changed, helper_command, helpers_waiting
 from tinkertom.beads import beads_call
 from tinkertom.config import Config
 from tinkertom.mcp import available_tools, response
@@ -32,8 +32,12 @@ class HelperTests(unittest.TestCase):
             path.chmod(0o755)
         (self.workspace / 'tinkertom.toml').write_text('permissions="yolo"\nreset_buffer_seconds=0\nretry_seconds=0.01\n')
         env = dict(os.environ, PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
-                   TT_FIXTURE_ROOT=str(self.workspace), TINKERTOM_PROVIDER='codex')
-        for key in ('TINKERTOM_HELPER', 'TINKERTOM_NATIVE_DIR', 'TINKERTOM_TASK_DIR'):
+                   TT_FIXTURE_ROOT=str(self.workspace), TINKERTOM_PROVIDER='codex',
+                   COPILOT_GITHUB_TOKEN='copilot-only-token', GH_TOKEN='gh-token',
+                   GITHUB_TOKEN='github-token')
+        for key in ('TINKERTOM_HELPER', 'TINKERTOM_NATIVE_DIR', 'TINKERTOM_TASK_DIR',
+                    'TINKERTOM_CONFIG_PATH', 'TINKERTOM_PROFILE', 'TINKERTOM_MANAGED',
+                    'TINKERTOM_ATTEMPT'):
             env.pop(key, None)
         self.env = env
         patched = patch.dict(os.environ, env, clear=True)
@@ -98,20 +102,70 @@ class HelperTests(unittest.TestCase):
                 self.assertEqual(request['profile'], 'authorized_security')
                 self.assertEqual(state['profile'], 'authorized_security')
 
+    def test_worker_prompt_forbids_publication_and_snapshot_ignores_working_tree_edits(self):
+        with patch.dict(os.environ, {'TINKERTOM_PROVIDER': 'claude', 'ENABLE_TOOL_SEARCH': 'auto'}):
+            self.scenario(['complete'])
+            value, error = agent_call('code_worker', {'task': 'Implement', 'files': ['feature.txt']}, self.workspace)
+            self.assertFalse(error)
+            prompt = self.calls()[0]['prompt']
+            self.assertIn('Never stage, commit or push.', prompt)
+            self.assertIn('TinkerTom has no publication mechanism', prompt)
+
+    def test_git_snapshot_detects_index_commit_tag_but_not_working_tree_edits(self):
+        def git(*args):
+            subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *args], cwd=self.workspace,
+                           check=True, capture_output=True)
+        self.assertIsNone(git_snapshot(self.workspace))
+        git('init', '-q')
+        (self.workspace / 'a.txt').write_text('one')
+        git('add', 'a.txt')
+        git('commit', '-qm', 'one')
+        base = git_snapshot(self.workspace)
+        (self.workspace / 'a.txt').write_text('two')
+        (self.workspace / 'new.txt').write_text('untracked')
+        self.assertFalse(git_snapshot_changed(base, git_snapshot(self.workspace)))
+        git('add', 'a.txt')
+        self.assertTrue(git_snapshot_changed(base, git_snapshot(self.workspace)))
+        git('reset', '-q')
+        self.assertFalse(git_snapshot_changed(base, git_snapshot(self.workspace)))
+        git('tag', 'v1')
+        self.assertTrue(git_snapshot_changed(base, git_snapshot(self.workspace)))
+        git('tag', '-d', 'v1')
+        git('commit', '-qam', 'two')
+        self.assertTrue(git_snapshot_changed(base, git_snapshot(self.workspace)))
+        self.assertFalse(git_snapshot_changed(None, base))
+
+    def test_claude_worker_keeps_safety_hook_when_compression_is_disabled(self):
+        from dataclasses import replace
+        directory = self.workspace / 'task'
+        directory.mkdir()
+        config = replace(Config(), provider='claude', claude_hook=False)
+        argv = helper_command(config, None, False, directory, self.workspace)
+        self.assertIn('--settings', argv)
+        settings = json.loads(Path(argv[argv.index('--settings') + 1]).read_text())
+        self.assertEqual(settings['hooks']['PreToolUse'][0]['matcher'], 'Bash')
+
     def test_smaller_workers_wait_then_resume_same_cli_and_session(self):
         for provider, model in [('codex', 'gpt-5.6-luna'), ('claude', 'sonnet')]:
-            with self.subTest(provider=provider), patch.dict(os.environ, TINKERTOM_PROVIDER=provider,
+            environment = {'TINKERTOM_PROVIDER': provider}
+            if provider == 'claude':
+                environment['ENABLE_TOOL_SEARCH'] = 'auto'
+            with self.subTest(provider=provider), patch.dict(os.environ, environment,
                     CLAUDECODE='1', CLAUDE_CODE_SESSION_ID='parent-session', CLAUDE_CODE_CHILD_SESSION='1', CLAUDE_PID='123', CODEX_THREAD_ID='parent-thread'):
                 self.scenario(['rate', 'complete'])
                 value, error = agent_call('code_worker', {'task': 'Implement feature and check it', 'files': ['feature.txt']}, self.workspace)
                 self.assertFalse(error)
                 self.assertEqual(json.loads(value)['status'], 'complete')
                 first, second = self.calls()
+                if provider == 'claude':
+                    self.assertEqual(first['enable_tool_search'], 'auto')
                 self.assertGreaterEqual(second['at'] - first['at'], .5)
                 self.assertIn('helper-exact', second['argv'])
                 self.assertIn(model, second['argv'])
                 self.assertEqual(second['cwd'], str(self.workspace))
                 self.assertIn('tinkertom', ' '.join(second['argv']))
+                if provider == 'claude':
+                    self.assertEqual(second['enable_tool_search'], 'auto')
                 self.assertTrue(all(value is None for value in second['parent_identity'].values()))
                 if provider == 'claude' and os.geteuid() == 0:
                     self.assertEqual(second['is_sandbox'], '1')
@@ -138,6 +192,8 @@ class HelperTests(unittest.TestCase):
                                  ('copilot', 'claude-opus-5.5'))
                 primary, fallback = self.calls()
                 self.assertEqual((primary['provider'], fallback['provider']), ('claude', 'copilot'))
+                self.assertEqual(primary['auth_env'], {'copilot': False, 'gh': True, 'github': True})
+                self.assertEqual(fallback['auth_env'], {'copilot': True, 'gh': False, 'github': False})
                 self.assertNotIn('-p', fallback['argv'])
                 self.assertNotIn('--resume', fallback['argv'])
                 self.assertEqual(fallback['argv'][fallback['argv'].index('--model') + 1], 'claude-opus-5.5')
@@ -226,6 +282,23 @@ class HelperTests(unittest.TestCase):
         self.assertIn('Primary Claude failed:', result['reason'])
         self.assertIn('Copilot fallback failed:', result['reason'])
 
+    def test_fallback_requires_dedicated_copilot_token(self):
+        self.scenario(['auth', 'review'])
+        for token in (None, '', '   '):
+            self.scenario(['auth', 'review'])
+            with self.subTest(token=repr(token)), patch.dict(os.environ, {}):
+                if token is None:
+                    os.environ.pop('COPILOT_GITHUB_TOKEN', None)
+                else:
+                    os.environ['COPILOT_GITHUB_TOKEN'] = token
+                value, error = agent_call('rubber_duck', {
+                    'proposal': 'Review without dedicated Copilot credentials', 'force': True}, self.workspace)
+            result = json.loads(value)
+            self.assertTrue(error)
+            self.assertEqual([call['provider'] for call in self.calls()], ['claude'])
+            self.assertIn('COPILOT_GITHUB_TOKEN is not set', result['fallback_failure'])
+            self.assertIn('refusing to use gh auth or stored Copilot OAuth', result['fallback_failure'])
+
     def test_explicit_mcp_bootstrap_survives_sanitized_environment(self):
         snapshot = self.workspace / '.tinkertom/native/codex/config.json'
         snapshot.parent.mkdir(parents=True)
@@ -233,6 +306,7 @@ class HelperTests(unittest.TestCase):
             provider='codex', rubber_duck_profile='general',
             claude_security_duck_model='claude-opus-4-6').to_dict()))
         hostile = {'PATH': self.env['PATH'], 'TT_FIXTURE_ROOT': str(self.workspace),
+                   'COPILOT_GITHUB_TOKEN': 'copilot-only-token',
                    'TINKERTOM_PROVIDER': 'claude', 'TINKERTOM_PROFILE': 'general',
                    'TINKERTOM_HELPER': '1'}
         with patch.dict(os.environ, hostile, clear=True):
@@ -295,7 +369,7 @@ class HelperTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 agent_call('code_worker', args, self.workspace)
         (self.workspace / 'tinkertom.toml').write_text('beads=false\ndelegate_coding=false\nrubber_duck=false\n')
-        self.assertEqual(len(available_tools(self.workspace)), 4)
+        self.assertEqual(len(available_tools(self.workspace)), 5)
 
     def test_headless_timeout_excludes_live_helper_wait_only(self):
         directory = self.workspace / '.tinkertom/agents/test'

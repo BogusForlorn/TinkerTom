@@ -9,6 +9,7 @@ tinkertom claude
 ```
 
 The per-invocation TinkerTom MCP server exposes `code_worker`, `rubber_duck` and `beads`, alongside RTK/Headroom `run`, focused `read`, `symbols` and `wait_status`. No separate provider API client, API proxy or Copilot CLI is used. Sign into both installed CLIs to use opposite-provider reviews. Existing CLI authentication and account billing settings apply.
+The explicit-only `/handover` skill is installed into both provider skill directories during setup. It persists only through the TinkerTom handover action and never falls back to raw writes. The coordinator reviews worker diffs; `rubber_duck` is the dedicated opposite-provider read-only MCP reviewer. Codex `/review` and Claude `/security-review` remain provider-native built-ins and are not interchangeable general reviewers.
 
 ## Model roles
 
@@ -88,6 +89,8 @@ worker_max_turns = 8
 
 Smaller workers, bounded evidence, cached identical critiques, focused reads and RTK/Headroom reduce avoidable context. Delegation and independent reviews also consume tokens and can cost more for small tasks. No universal savings percentage is claimed. Helper usage fields are saved when the CLI supplies them; `tinkertom savings` measures command-output reduction, not total account billing.
 
-Role matrix: Codex parent code workers use GPT-5.6 Luna; Claude parent code workers use Sonnet. Codex-parent authorized-security rubber ducks use Claude Opus 4.6; Claude-parent authorized-security rubber ducks use `gpt-daybreak-blue-latest`. Native Claude pentest coordinators use `claude_pentest_model` by default, with explicit CLI model taking precedence over project `model`, and project `model` taking precedence over that default.
+Role matrix: Codex parent code workers use GPT-5.6 Luna; Claude parent code workers use Sonnet. Codex-parent authorized-security rubber ducks use Claude Opus 4.6; Claude-parent authorized-security rubber ducks use `gpt-daybreak-blue-latest`. Native Claude pentest coordinators default to `claude-opus-4-6`, with explicit CLI model taking precedence over project `model`, and project `model` taking precedence over that default. Native Claude dynamically discovers MCP tools so schemas do not consume the context window; normal compaction remains available, while fixed tool schemas cannot be compacted.
 
 Model references: [GPT-5.6 Sol](https://developers.openai.com/api/docs/models/gpt-5.6-sol), [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna), [Claude model configuration](https://code.claude.com/docs/en/model-config). Availability depends on the signed-in CLI account.
+
+Workers never stage, commit or push. Coordinators never commit, push, open pull requests, tag, publish or deploy. “Complete” and “deliver” mean verified unstaged working-tree changes; ambiguous words such as ship or release are not authorization. TinkerTom has no agent publication mechanism. Publication is performed manually by the user with exact terminal commands supplied by the coordinator. These are good-faith guards, not a sandbox: the hook can fail open (for example on a hook error, malformed payload or a command it cannot parse), scripts or other tools can bypass it, and an explicit URL push may not update local remote-tracking refs. After each worker attempt TinkerTom compares a Git snapshot (HEAD, index, refs, stash list; ordinary working-tree edits are ignored) and blocks on any change, but this only detects the change and does not undo it. Publication remains user-terminal only.

@@ -7,6 +7,7 @@ import shlex
 import sys
 
 from .storage import atomic_write
+from .publication import publication_denial
 
 
 def settings_file(directory: Path) -> Path:
@@ -24,6 +25,12 @@ def rewrite_event(event: dict) -> dict | None:
     tool_input = event.get("tool_input") or {}
     command = tool_input.get("command", "")
     if not isinstance(command, str) or not command:
+        return None
+    denial = publication_denial(command)
+    if denial:
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                "permissionDecision": "deny", "permissionDecisionReason": denial}}
+    if os.environ.get("TINKERTOM_COMMAND_COMPRESSION", "1") != "1":
         return None
     # Only wrap simple commands. Compound shells, redirects, substitutions and
     # shell state changes must keep their original semantics in Claude's shell.

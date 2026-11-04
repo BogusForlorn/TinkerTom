@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import subprocess
 import tempfile
 import time
 import uuid
@@ -18,6 +19,29 @@ from .optimization import provider_environment, SUITE_ROOT
 from .process import run_process
 from .providers import command, copilot_command, parse_report
 from .storage import atomic_write
+
+
+def git_snapshot(workspace):
+    """Capture refs/index/HEAD, excluding ordinary working-tree edits."""
+    try:
+        def run(*args, check=True):
+            return subprocess.run(["git", *args], cwd=workspace, text=True,
+                                  capture_output=True, check=check).stdout
+        inside = run("rev-parse", "--is-inside-work-tree").strip()
+        if inside != "true":
+            return None
+        head = run("symbolic-ref", "--quiet", "--short", "HEAD", check=False).strip() or "(detached)"
+        sha = run("rev-parse", "--verify", "HEAD", check=False).strip() or "(unborn)"
+        return {"head": head,
+                "sha": sha,
+                "index": run("ls-files", "-s"),
+                "refs": run("show-ref", "--head", check=False) + run("stash", "list", "--format=%H %gd")}
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def git_snapshot_changed(before, after):
+    return before is not None and after is not None and before != after
 
 
 def active_config(workspace):
@@ -76,13 +100,13 @@ def helper_command(config, session, review, directory, workspace):
         else:
             from .native import codex_settings
             argv[-1:-1] = codex_settings(workspace, directory / "config.json", config.provider,
-                                          config.rubber_duck_profile, helper=True, managed=True)
+                                          config.rubber_duck_profile, helper=True, managed=True,
+                                          auto_compact_tokens=config.auto_compact_tokens)
     elif review:
         argv += ["--tools", "", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--effort", "high"]
     else:
         from .native import mcp_config
-        if config.claude_hook:
-            argv += ["--settings", str(settings_file(directory))]
+        argv += ["--settings", str(settings_file(directory))]
         argv += ["--effort", "medium", "--mcp-config",
                  json.dumps({"mcpServers": {"tinkertom": mcp_config(
                      workspace, directory / "config.json", config.provider,
@@ -185,6 +209,11 @@ def agent_call(kind, args, workspace: Path):
                 cached = {**json.loads(result_path.read_text()), "cached": True}
                 return json.dumps(cached), cached.get("status") == "blocked"
             env = provider_environment(provider, "standard" if review else config.permissions)
+            # The Copilot fallback must use its dedicated account token, never
+            # whichever account gh or Copilot's credential store happens to
+            # select. Keep the token out of the primary helper environment and
+            # inject it only into the isolated fallback process.
+            copilot_github_token = env.pop("COPILOT_GITHUB_TOKEN", None)
             # These are independent CLI sessions. Do not inherit the parent's
             # nesting guard, session identity or native lifecycle hooks.
             for key in ("TINKERTOM_NATIVE_DIR", "TINKERTOM_TASK_DIR", "TINKERTOM_CONFIG_PATH",
@@ -193,9 +222,16 @@ def agent_call(kind, args, workspace: Path):
                 env.pop(key, None)
             env.update(TINKERTOM_HELPER="1", TINKERTOM_MANAGED="1", TINKERTOM_PROVIDER=provider,
                        TINKERTOM_TASK_DIR=str(directory), TINKERTOM_RTK=str(int(config.rtk)),
-                       TINKERTOM_HEADROOM=str(int(config.headroom)))
+                       TINKERTOM_HEADROOM=str(int(config.headroom)),
+                       TINKERTOM_COMMAND_COMPRESSION=str(int(config.claude_hook)))
             if provider == "claude":
+                from .native import claude_compaction_environment
                 env["MCP_TOOL_TIMEOUT"] = "604800000"
+                env.update(claude_compaction_environment(config.auto_compact_tokens))
+            else:
+                from .native import claude_compaction_environment
+                for key in ("ENABLE_TOOL_SEARCH", *claude_compaction_environment(config.auto_compact_tokens)):
+                    env.pop(key, None)
             env["PYTHONPATH"] = str(SUITE_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
             child = replace(config, provider=provider, model=model, executable=provider,
                             permissions="standard" if review else config.permissions)
@@ -216,11 +252,18 @@ def agent_call(kind, args, workspace: Path):
             def copilot_fallback(primary_failure):
                 """Run at most one isolated fallback and always return a terminal result."""
                 copilot = shutil.which("copilot", path=env["PATH"])
-                if not copilot:
+                if not isinstance(copilot_github_token, str) or not copilot_github_token.strip():
+                    fallback_failure = ("COPILOT_GITHUB_TOKEN is not set; refusing to use gh auth "
+                                        "or stored Copilot OAuth for the fallback")
+                    actual_provider, actual_model = provider, model
+                elif not copilot:
                     fallback_failure = "Copilot CLI is missing"
                     actual_provider, actual_model = provider, model
                 else:
                     fallback_env = dict(env)
+                    fallback_env["COPILOT_GITHUB_TOKEN"] = copilot_github_token
+                    fallback_env.pop("GH_TOKEN", None)
+                    fallback_env.pop("GITHUB_TOKEN", None)
                     for key in ("TINKERTOM_NATIVE_DIR", "TINKERTOM_TASK_DIR", "TINKERTOM_CONFIG_PATH",
                                 "TINKERTOM_PROFILE", "TINKERTOM_ATTEMPT",
                                 "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
@@ -297,6 +340,8 @@ def agent_call(kind, args, workspace: Path):
                     else:
                         prompt = ("You are a smaller-model implementation worker. Implement only the assigned task and file scope below. "
                                   "The main agent owns planning, review and final acceptance. Don't delegate or call another model. "
+                                  "Never stage, commit or push. Complete/deliver means verified unstaged working-tree changes. "
+                                  "TinkerTom has no publication mechanism; provide exact terminal commands for the user if asked. "
                                   "Use tinkertom MCP run/read/symbols for concise output. Preserve unrelated working-tree changes. "
                                   "Report tests actually run, remaining risks and a brief summary; never claim tests passed without running them.\n" +
                                   json.dumps(request) + "\n" + CONTINUE + "\nReturn JSON only: " +
@@ -306,9 +351,16 @@ def agent_call(kind, args, workspace: Path):
                             "\nContinue the assigned implementation. Return JSON only with attempt=" + json.dumps(attempt) + ", status=complete/continue/blocked, summary, next_steps.")
                     prompt += "\n" + feedback
                     save(status="running")
+                    git_before = git_snapshot(workspace) if not review else None
                     outcome = run_process(helper_command(child, state.get("session_id"), review, directory, workspace),
                         cwd=cwd, prompt=prompt, log_dir=log_dir, timeout=config.agent_timeout_seconds, env=env,
                         stopped=lambda: stop[0], provider=provider, on_session=lambda sid: save(session_id=sid))
+                    git_after = git_snapshot(workspace) if git_before is not None else None
+                    if git_snapshot_changed(git_before, git_after):
+                        detail = {"old": git_before, "new": git_after}
+                        save(status="blocked", reason="Git state changed during worker attempt; source unknown")
+                        return json.dumps({**state, "status": "blocked", "reason": "Git state changed during worker attempt; source unknown",
+                                           "git_state": detail, "log_dir": str(log_dir)}), True
                     for key, value in outcome.usage.items():
                         if type(value) in (int, float):
                             state["usage"][key] = state["usage"].get(key, 0) + value

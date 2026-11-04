@@ -165,9 +165,15 @@ class RunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_config(self.store.workspace)
         for args in ({"max_stalls": 0}, {"cooldown_seconds": float("nan")}, {"max_turns": True},
-                     {"verify": "pytest"}, {"rubber_duck_profile": "friendly"}):
+                     {"verify": "pytest"}, {"rubber_duck_profile": "friendly"},
+                     {"coordinator_edits": "true"}, {"coordinator_edits": 1}):
             with self.assertRaises(ValueError):
                 Config(**args).validate()
+
+    def test_coordinator_edits_loads_from_toml_and_defaults_strict(self):
+        self.assertFalse(Config().validate().coordinator_edits)
+        (self.store.workspace / "tinkertom.toml").write_text("coordinator_edits = true\n")
+        self.assertTrue(load_config(self.store.workspace).coordinator_edits)
 
     def test_invalid_resume_override_does_not_corrupt_saved_configuration(self):
         state = self.create()

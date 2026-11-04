@@ -16,6 +16,10 @@ with calls.open('a') as out:
         'cwd': os.getcwd(), 'at': time.time(), 'pid': os.getpid(),
         'helper': os.environ.get('TINKERTOM_HELPER'), 'native': os.environ.get('TINKERTOM_NATIVE_DIR'),
         'task_dir': os.environ.get('TINKERTOM_TASK_DIR'), 'attempt': os.environ.get('TINKERTOM_ATTEMPT'),
+        'enable_tool_search': os.environ.get('ENABLE_TOOL_SEARCH'),
+        'auth_env': {'copilot': bool(os.environ.get('COPILOT_GITHUB_TOKEN')),
+                     'gh': bool(os.environ.get('GH_TOKEN')),
+                     'github': bool(os.environ.get('GITHUB_TOKEN'))},
         'parent_identity': {key: os.environ.get(key) for key in ('CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_PID', 'CODEX_THREAD_ID')},
         'is_sandbox': os.environ.get('IS_SANDBOX'), 'mcp_timeout': os.environ.get('MCP_TOOL_TIMEOUT')}) + '\n')
 

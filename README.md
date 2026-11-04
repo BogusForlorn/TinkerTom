@@ -23,7 +23,9 @@ tinkertom doctor
 
 For root-mode Claude, TinkerTom supplies the requested `IS_SANDBOX=1` together with `--dangerously-skip-permissions`, including on automatic retries. The variable is scoped to Claude's process environment; it does not create an OS sandbox. `--tt-standard` selects normal provider permissions.
 
-The native UI loads a local **TinkerTom MCP server** with RTK/Headroom command compression, focused file reads, Python symbol navigation, local cooldown status, smaller-model coding workers, opposite-provider rubber-duck reviews, and Beads task/memory tools. In normal autonomous native Codex mode, TinkerTom pre-approves only its own MCP tools; explicit provider permission/profile overrides retain prompts. Skills are instruction bundles and have no per-call approval. Claude also receives the simple-Bash optimization hook. Codex receives guidance to use the MCP tools; its built-in shell is not forcibly intercepted. TinkerTom MCP commands/helpers run with the local OS user's privileges and are not bounded by Codex `workspace-write`; Codex built-in shell/files remain `workspace-write`. Provider/org policies and MCP elicitation can still prompt. Your existing global provider files aren't rewritten.
+The native UI loads a local **TinkerTom MCP server** with RTK/Headroom command compression, focused file reads, Python symbol navigation, local cooldown status, smaller-model coding workers, opposite-provider rubber-duck reviews, and Beads task/memory tools. Claude uses dynamic MCP discovery, keeping large schemas out of the context window so normal compaction remains effective; fixed tool schemas cannot be compacted. Successful compaction clears stale wait state; queued prompts remain durable and are replayed through exact resume. This is not quota bypass: a genuine next rate limit schedules another normal wait. In normal autonomous native Codex mode, TinkerTom pre-approves only its own MCP tools; explicit provider permission/profile overrides retain prompts. Skills are instruction bundles and have no per-call approval. Claude also receives the simple-Bash optimization hook. Codex receives guidance to use the MCP tools; its built-in shell is not forcibly intercepted. TinkerTom MCP commands/helpers run with the local OS user's privileges and are not bounded by Codex `workspace-write`; Codex built-in shell/files remain `workspace-write`. Provider/org policies and MCP elicitation can still prompt. Setup does not rewrite global provider configuration files, but it installs or updates the TinkerTom-owned handover skill in each provider's skill directory.
+
+`/handover` is an explicit-only skill for verified cross-provider handoffs. Setup installs it at `${CODEX_HOME:-~/.codex}/skills/handover` and `${CLAUDE_CONFIG_DIR:-~/.claude}/skills/handover`; marked managed copies update atomically, while symlink or unowned conflicts are rejected. It uses provider-native compaction controls: Codex targets 130,000 tokens, while Claude approximates that target with its official 75% override and calculated window.
 
 | Main UI | Coding worker | Rubber duck |
 | --- | --- | --- |
@@ -31,6 +33,8 @@ The native UI loads a local **TinkerTom MCP server** with RTK/Headroom command c
 | `tinkertom claude` | Claude Code Sonnet | Codex reviewer (Daybreak for authorized security) |
 
 `tinkertom claude pentest` uses Claude Opus 4.6 as coordinator and Sonnet for coding workers. An explicit Claude `--model` (including `--model=...`) wins over the project `model`; otherwise the project model wins, and pentest uses `claude_pentest_model` when neither is set. Pentest changes the role/model profile only; it does not change provider permissions. Native Claude sessions deny built-in `Edit`, `Write`, `NotebookEdit`, and `Bash`, while TinkerTom MCP read/run/code_worker remain available. The coordinator must delegate implementation, review worker diffs, run acceptance checks, and deliver; `run` and shell are for diagnostics/tests/git, not source rewriting.
+
+Native coordinator editing is strict by default for both providers. Set `coordinator_edits = true` in `tinkertom.toml`, or opt in for one launch with `tinkertom codex --tt-coordinator-edits` / `tinkertom claude --tt-coordinator-edits`; the launch flag wins and is consumed by TinkerTom rather than forwarded to the provider. In opt-in mode native editing tools are available (Claude still blocks Bash rewriting), substantial changes should use `code_worker`, and publication prohibitions remain.
 
 Your chosen main model coordinates and reviews. Helpers use the installed CLIs and existing login sessions. Beads stores tasks, dependencies and durable discoveries locally. See [workflow, configuration and cost controls](docs/agents.md). Restart an already-running launcher to load the updated bridge and tool list.
 
@@ -165,7 +169,7 @@ tinkertom savings
 rtk gain
 ```
 
-**Claude:** a per-invocation PreToolUse hook wraps supported simple Bash calls automatically. It leaves compound shells, redirections and shell-state changes alone. **Codex:** instructions direct the agent to the tools; native tool calls are not forcibly intercepted. Built-in Read/Grep tools also bypass the Bash hook. Nothing is installed into global provider settings.
+**Claude:** a per-invocation PreToolUse hook always checks Bash for publication/Git mutations; when `claude_hook` is enabled it also wraps supported simple calls. **Codex:** TinkerTom supplies the same PreToolUse guard through Codex's hook configuration through a nested `hooks.PreToolUse` matcher group (your own Codex PreToolUse hooks are preserved; no trust bypass is applied, so Codex may ask for a one-time review). Normal coding remains approval-free within the configured workspace, while commits, pushes, releases, publishes and deploys remain a user-only boundary. TinkerTom does not rewrite global provider configuration files; setup does install or update the TinkerTom-owned handover skill in each provider's skill directory. When publication is requested, TinkerTom provides exact terminal commands for the user to run manually. These are good-faith guards, not a sandbox: the hook can fail open (for example on a hook error, malformed payload or a command it cannot parse), scripts or other tools can bypass it, and an explicit URL push may not update local remote-tracking refs. After each worker attempt TinkerTom compares a Git snapshot (HEAD, index, refs, stash list; ordinary working-tree edits are ignored) and blocks on any change, but this only detects the change and does not undo it. Publication remains user-terminal only.
 
 Headroom runs locally on new command output, with neural Kompress disabled and tokenizer vocabularies cached. No compression proxy or alternate API billing route is started. Full conversation histories and cached provider prefixes are left intact. Output compression is lossy; inspect saved logs or use `--raw` for exact data. When RTK runs first, captured logs contain RTK's output, not the original pre-RTK stream. These are measured output reductions, not guaranteed bill savings. See [token reduction details](docs/token-reduction.md), [RTK](https://github.com/rtk-ai/rtk), and [Headroom](https://github.com/headroomlabs-ai/headroom).
 
@@ -177,6 +181,7 @@ Other controls in `tinkertom.toml`:
 | `max_turns` | `0` | Optional total successful-turn cap; `0` is unlimited |
 | `max_context_turns` | `0` | Optional fresh-session rotation; leave at `0` to retain native resume/compaction |
 | `checkpoint_chars` | `12000` | Bound checkpoint text injected into fresh sessions |
+| `auto_compact_tokens` | `130000` | Provider-native automatic compaction target (110000..150000) |
 | `max_stalls` | `5` | Stop repeated unchanged progress or malformed reports |
 | `max_failures` | `5` | Stop consecutive non-quota CLI failures |
 | `turn_timeout_seconds` | `3600` | Stop a hung CLI and retry with saved context |
@@ -190,6 +195,9 @@ Other controls in `tinkertom.toml`:
 | `claude_pentest_model` | `claude-opus-4-6` | Native Claude pentest coordinator default |
 | `agent_timeout_seconds` | `900` | Bound each helper CLI invocation, excluding quota cooldowns |
 | `worker_max_turns` | `8` | Bound successful helper turns before coordinator intervention |
+| `coordinator_edits` | `false` | Allow native coordinators to use provider editing tools directly |
+
+The Copilot fallback requires `COPILOT_GITHUB_TOKEN` in TinkerTom's launch environment. It removes `GH_TOKEN` and `GITHUB_TOKEN` from the fallback process and will not intentionally use the account selected by `gh auth`; this keeps Git push authentication independent from the Copilot model entitlement. Export the token before starting `tinkertom codex` so the long-lived MCP process inherits it.
 
 Tasks snapshot their configuration at creation. Editing the project TOML changes future tasks. On an existing task, `resume --model NAME`, `--permissions yolo`, `--executable PATH`, or `--max-turns 0` updates those specific settings. Context rotation can lose useful details and cache benefits; it is optional, not a guaranteed saving.
 

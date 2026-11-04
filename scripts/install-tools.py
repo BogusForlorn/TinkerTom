@@ -17,6 +17,62 @@ import tempfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
+HANDOVER_MARKER = "TinkerTom-managed skill: handover\n"
+
+
+def _atomic_text(path, contents):
+    """Replace one regular file without following symlinks."""
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise SystemExit(f"Refusing to overwrite non-regular file: {path}")
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent,
+                                    prefix=f".{path.name}-", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def install_handover_skill():
+    """Install only the TinkerTom-owned handover files in both provider roots."""
+    source = ROOT / "tinkertom" / "skills" / "handover"
+    files_by_provider = {
+        "codex": {"SKILL.md": source / "SKILL.md", "agents/openai.yaml": source / "agents/openai.yaml"},
+        "claude": {"SKILL.md": source / "claude/SKILL.md"},
+    }
+    for files in files_by_provider.values():
+        for path in files.values():
+            if not path.is_file() or path.is_symlink():
+                raise SystemExit(f"Missing handover skill file: {path}")
+    roots = {
+        "codex": Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "skills" / "handover",
+        "claude": Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude") / "skills" / "handover",
+    }
+    for provider, target in roots.items():
+        files = files_by_provider[provider]
+        if target.is_symlink() or (target.exists() and not target.is_dir()):
+            raise SystemExit(f"Refusing handover skill symlink/conflict: {target}")
+        target.mkdir(parents=True, exist_ok=True)
+        marker = target / ".tinkertom-owned"
+        if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+            raise SystemExit(f"Refusing handover skill marker conflict: {marker}")
+        if marker.exists() and marker.read_text(encoding="utf-8") != HANDOVER_MARKER:
+            raise SystemExit(f"Refusing unowned handover skill: {target}")
+        if not marker.exists():
+            # A nonempty unmarked directory is user-owned, even if filenames differ.
+            if any(target.iterdir()):
+                raise SystemExit(f"Refusing unowned handover skill: {target}")
+            _atomic_text(marker, HANDOVER_MARKER)
+        for relative, original in files.items():
+            destination = target / relative
+            if destination.parent != target:
+                if destination.parent.is_symlink() or (destination.parent.exists() and not destination.parent.is_dir()):
+                    raise SystemExit(f"Refusing handover skill path conflict: {destination.parent}")
+            destination.parent.mkdir(exist_ok=True)
+            _atomic_text(destination, original.read_text(encoding="utf-8"))
 
 
 def platform_key(system=None, machine=None):
@@ -214,6 +270,7 @@ def main(argv=None):
     else:
         install_binary(binary_dir, "bd", releases["beads"])
     install_python_packages(pins, args.system)
+    install_handover_skill()
     for name, distribution in (("headroom", "headroom-ai"), ("tinkertom", "tinkertom")):
         write_launcher(binary_dir, name, distribution)
     # Vocab caching is best-effort. Compression uses estimates if downloads are
