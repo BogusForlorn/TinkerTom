@@ -21,6 +21,51 @@ from .providers import command, copilot_command, parse_report
 from .storage import atomic_write
 
 
+_COPILOT_TOKEN_MAX_BYTES = 16 * 1024
+_COPILOT_ZSH_TIMEOUT = 2
+
+
+def _usable_copilot_token(value):
+    """Return a safe token value, without ever serializing or logging it."""
+    if not isinstance(value, str) or "\x00" in value:
+        return None
+    if (not value.strip() or value != value.strip() or any(char.isspace() for char in value)
+            or len(value.encode()) > _COPILOT_TOKEN_MAX_BYTES):
+        return None
+    return value
+
+
+def _recover_copilot_token(env):
+    """Recover an exported token from a fresh interactive zsh, if available."""
+    zsh = shutil.which("zsh", path=env.get("PATH"))
+    if not zsh:
+        return None
+    zsh_env = dict(env)
+    zsh_env.pop("COPILOT_GITHUB_TOKEN", None)
+    # This command is constant: only the executable path comes from PATH.
+    argv = [zsh, "-ic", 'printf "%s" "${COPILOT_GITHUB_TOKEN-}"']
+    proc = None
+    try:
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, env=zsh_env, start_new_session=True)
+        stdout, _stderr = proc.communicate(timeout=_COPILOT_ZSH_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                proc.kill()
+            proc.communicate()
+        return None
+    if proc.returncode != 0 or len(stdout) > _COPILOT_TOKEN_MAX_BYTES:
+        return None
+    try:
+        token = stdout.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return _usable_copilot_token(token)
+
+
 def git_snapshot(workspace):
     """Capture refs/index/HEAD, excluding ordinary working-tree edits."""
     try:
@@ -213,7 +258,11 @@ def agent_call(kind, args, workspace: Path):
             # whichever account gh or Copilot's credential store happens to
             # select. Keep the token out of the primary helper environment and
             # inject it only into the isolated fallback process.
-            copilot_github_token = env.pop("COPILOT_GITHUB_TOKEN", None)
+            inherited_copilot_token = env.pop("COPILOT_GITHUB_TOKEN", None)
+            copilot_github_token = _usable_copilot_token(inherited_copilot_token)
+            recover_copilot_token = (inherited_copilot_token is None or
+                                     (isinstance(inherited_copilot_token, str) and
+                                      not inherited_copilot_token.strip()))
             # These are independent CLI sessions. Do not inherit the parent's
             # nesting guard, session identity or native lifecycle hooks.
             for key in ("TINKERTOM_NATIVE_DIR", "TINKERTOM_TASK_DIR", "TINKERTOM_CONFIG_PATH",
@@ -252,16 +301,19 @@ def agent_call(kind, args, workspace: Path):
             def copilot_fallback(primary_failure):
                 """Run at most one isolated fallback and always return a terminal result."""
                 copilot = shutil.which("copilot", path=env["PATH"])
-                if not isinstance(copilot_github_token, str) or not copilot_github_token.strip():
-                    fallback_failure = ("COPILOT_GITHUB_TOKEN is not set; refusing to use gh auth "
-                                        "or stored Copilot OAuth for the fallback")
+                resolved_token = copilot_github_token
+                if resolved_token is None and recover_copilot_token:
+                    resolved_token = _recover_copilot_token(env)
+                if resolved_token is None:
+                    fallback_failure = ("No dedicated COPILOT_GITHUB_TOKEN was available from either "
+                                        "the launch environment or interactive zsh")
                     actual_provider, actual_model = provider, model
                 elif not copilot:
                     fallback_failure = "Copilot CLI is missing"
                     actual_provider, actual_model = provider, model
                 else:
                     fallback_env = dict(env)
-                    fallback_env["COPILOT_GITHUB_TOKEN"] = copilot_github_token
+                    fallback_env["COPILOT_GITHUB_TOKEN"] = resolved_token
                     fallback_env.pop("GH_TOKEN", None)
                     fallback_env.pop("GITHUB_TOKEN", None)
                     for key in ("TINKERTOM_NATIVE_DIR", "TINKERTOM_TASK_DIR", "TINKERTOM_CONFIG_PATH",

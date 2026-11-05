@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -286,7 +287,9 @@ class HelperTests(unittest.TestCase):
         self.scenario(['auth', 'review'])
         for token in (None, '', '   '):
             self.scenario(['auth', 'review'])
-            with self.subTest(token=repr(token)), patch.dict(os.environ, {}):
+            with self.subTest(token=repr(token)), patch.dict(os.environ, {}), patch(
+                    'tinkertom.agents.shutil.which',
+                    side_effect=lambda name, **_: None if name == 'zsh' else str(self.bin / name)):
                 if token is None:
                     os.environ.pop('COPILOT_GITHUB_TOKEN', None)
                 else:
@@ -296,8 +299,78 @@ class HelperTests(unittest.TestCase):
             result = json.loads(value)
             self.assertTrue(error)
             self.assertEqual([call['provider'] for call in self.calls()], ['claude'])
-            self.assertIn('COPILOT_GITHUB_TOKEN is not set', result['fallback_failure'])
-            self.assertIn('refusing to use gh auth or stored Copilot OAuth', result['fallback_failure'])
+            self.assertIn('No dedicated COPILOT_GITHUB_TOKEN was available', result['fallback_failure'])
+            self.assertNotIn('gh auth', result['fallback_failure'])
+
+    def test_inherited_token_precedes_interactive_zsh_recovery(self):
+        marker = self.workspace / 'zsh-called'
+        zsh = self.bin / 'zsh'
+        zsh.write_text('#!/bin/sh\nprintf called > "$TT_ZSH_MARKER"\nprintf %s recovered-token\n')
+        zsh.chmod(0o755)
+        self.scenario(['auth', 'review'])
+        with patch.dict(os.environ, {'TT_ZSH_MARKER': str(marker)}), patch(
+                'tinkertom.agents.shutil.which',
+                side_effect=lambda name, **_: (_ for _ in ()).throw(AssertionError('zsh was invoked'))
+                if name == 'zsh' else str(self.bin / name)):
+            value, error = agent_call('rubber_duck', {'proposal': 'Inherited token wins'}, self.workspace)
+        self.assertFalse(error, value)
+        self.assertFalse(marker.exists())
+        self.assertEqual(json.loads(value)['actual_provider'], 'copilot')
+        self.assertEqual(self.calls()[-1]['auth_env'], {'copilot': True, 'gh': False, 'github': False})
+
+    def test_interactive_zsh_recovery_isolated_and_not_serialized(self):
+        marker = self.workspace / 'zsh-called'
+        token = 'recovered-secret-token'
+        zsh = self.bin / 'zsh'
+        zsh.write_text('#!/bin/sh\nprintf called > "$TT_ZSH_MARKER"\nprintf %s ' + token + '\n')
+        zsh.chmod(0o755)
+        self.scenario(['auth', 'review'])
+        with patch.dict(os.environ, {'TT_ZSH_MARKER': str(marker)}), patch(
+                'tinkertom.agents.shutil.which',
+                side_effect=lambda name, **_: str(zsh) if name == 'zsh' else str(self.bin / name)):
+            os.environ.pop('COPILOT_GITHUB_TOKEN', None)
+            value, error = agent_call('rubber_duck', {'proposal': 'Recover token'}, self.workspace)
+        self.assertFalse(error, value)
+        self.assertTrue(marker.exists())
+        self.assertEqual(self.calls()[0]['auth_env'], {'copilot': False, 'gh': True, 'github': True})
+        self.assertEqual(self.calls()[-1]['auth_env'], {'copilot': True, 'gh': False, 'github': False})
+        serialized = '\n'.join(path.read_text(errors='replace')
+                                for path in [self.workspace / 'calls.jsonl',
+                                             *self.workspace.glob('.tinkertom/agents/*/*.json')]
+                                if path.is_file())
+        self.assertNotIn(token, serialized)
+
+    def test_zsh_recovery_failures_fail_closed_without_shell_output(self):
+        cases = {
+            'failing': '#!/bin/sh\nprintf shell-secret >&2\nexit 3\n',
+            'oversized': '#!/bin/sh\nprintf %s ' + ('x' * 17000) + '\n',
+            'timeout': '#!/bin/sh\nsleep 1\n',
+        }
+        for name, script in cases.items():
+            with self.subTest(name=name):
+                zsh = self.bin / 'zsh'
+                zsh.write_text(script)
+                zsh.chmod(0o755)
+                self.scenario(['auth', 'review'])
+                os.environ.pop('COPILOT_GITHUB_TOKEN', None)
+                timeout = patch('tinkertom.agents._COPILOT_ZSH_TIMEOUT', .01) if name == 'timeout' else nullcontext()
+                which = patch('tinkertom.agents.shutil.which',
+                              side_effect=lambda command, **_: str(zsh) if command == 'zsh' else str(self.bin / command))
+                with timeout, which:
+                    value, error = agent_call('rubber_duck', {'proposal': 'Reject bad zsh output', 'force': True}, self.workspace)
+                result = json.loads(value)
+                self.assertTrue(error)
+                self.assertEqual([call['provider'] for call in self.calls()], ['claude'])
+                self.assertIn('No dedicated COPILOT_GITHUB_TOKEN was available', result['fallback_failure'])
+                self.assertNotIn('shell-secret', value)
+
+        self.scenario(['auth', 'review'])
+        os.environ.pop('COPILOT_GITHUB_TOKEN', None)
+        with patch('tinkertom.agents.shutil.which',
+                   side_effect=lambda name, **_: None if name == 'zsh' else str(self.bin / name)):
+            value, error = agent_call('rubber_duck', {'proposal': 'Missing zsh', 'force': True}, self.workspace)
+        self.assertTrue(error)
+        self.assertIn('No dedicated COPILOT_GITHUB_TOKEN was available', json.loads(value)['fallback_failure'])
 
     def test_explicit_mcp_bootstrap_survives_sanitized_environment(self):
         snapshot = self.workspace / '.tinkertom/native/codex/config.json'

@@ -197,7 +197,7 @@ Other controls in `tinkertom.toml`:
 | `worker_max_turns` | `8` | Bound successful helper turns before coordinator intervention |
 | `coordinator_edits` | `false` | Allow native coordinators to use provider editing tools directly |
 
-The Copilot fallback requires `COPILOT_GITHUB_TOKEN` in TinkerTom's launch environment. It removes `GH_TOKEN` and `GITHUB_TOKEN` from the fallback process and will not intentionally use the account selected by `gh auth`; this keeps Git push authentication independent from the Copilot model entitlement. Export the token before starting `tinkertom codex` so the long-lived MCP process inherits it.
+The Copilot fallback prefers an inherited `COPILOT_GITHUB_TOKEN`. If an already-running TinkerTom does not have one, it can securely recover an exported token from a fresh interactive `zsh` and use it only for the isolated Copilot fallback; this executes the user's `~/.zshrc`. It removes `GH_TOKEN` and `GITHUB_TOKEN` from the fallback process and will not intentionally use the account selected by `gh auth`; this keeps Git push authentication independent from the Copilot model entitlement. Export the token before starting `tinkertom codex` when possible so the long-lived MCP process inherits it.
 
 Tasks snapshot their configuration at creation. Editing the project TOML changes future tasks. On an existing task, `resume --model NAME`, `--permissions yolo`, `--executable PATH`, or `--max-turns 0` updates those specific settings. Context rotation can lose useful details and cache benefits; it is optional, not a guaranteed saving.
 
