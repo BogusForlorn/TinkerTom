@@ -166,7 +166,7 @@ def reset_time(data, now: float) -> float | None:
 
 
 RATE_PATTERN = re.compile(r"rate[ _-]?limit|usage[ _-]?limit|usageLimitReached|too many requests|\b429\b|(?:hit|reached|exceeded).{0,30}(?:limit|quota)|limit.{0,20}(?:reached|exceeded)", re.I)
-AUTH_PATTERN = re.compile(r"unauthorized|unauthenticated|authenticat(?:e|ion)|oauth|invalid.{0,10}(?:api.?key|token)|not logged in|please (?:log|sign) in|\b401\b|insufficient_quota|credit balance|billing|payment required|dangerously-skip-permissions.{0,60}root|permission denied|unknown (?:option|argument)|unexpected argument|model.{0,40}(?:not found|does not exist|not supported)", re.I)
+AUTH_PATTERN = re.compile(r"unauthorized|unauthenticated|authenticat(?:e|ion)|oauth|invalid.{0,10}(?:api.?key|token)|not logged in|please (?:log|sign) in|\b401\b|insufficient_quota|credit balance|billing|payment required|dangerously-skip-permissions.{0,60}root|permission denied", re.I)
 SESSION_PATTERN = re.compile(r"(?:session|thread|conversation).{0,60}(?:not found|does not exist|expired)|no (?:conversation|session).{0,30}(?:found|with)", re.I)
 CONTEXT_PATTERN = re.compile(r"context.{0,30}(?:exceeded|full|limit)|prompt is too long|maximum context length", re.I)
 

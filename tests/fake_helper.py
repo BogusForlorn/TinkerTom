@@ -11,8 +11,25 @@ scenario = json.loads((root / 'scenario.json').read_text())
 calls = root / 'calls.jsonl'
 
 # Capability/auth probes are deliberately not review calls.
+if sys.argv[1:] == ['--help']:
+    outcome = scenario.get('help', 'both' if scenario.get('remote_supported', True) else 'neither')
+    if outcome == 'timeout':
+        time.sleep(60)
+    if outcome == 'failure':
+        print('help unavailable', file=sys.stderr)
+        sys.exit(2)
+    if outcome == 'oversized':
+        print('x' * 17000)
+    elif outcome == 'both':
+        print('  --no-remote        disable remote mode')
+        print('  --no-remote-export disable remote export')
+    elif outcome == 'prose':
+        print('The --no-remote and --no-remote-export options were removed.')
+    else:
+        print('  --version          show version')
+    sys.exit(0)
 if '--version' in sys.argv[1:]:
-    sys.exit(0 if scenario.get('remote_supported', True) else 2)
+    sys.exit(0)
 if sys.argv[1:] == ['auth', 'status']:
     marker = os.environ.get('TT_AUTH_PROBE_MARKER')
     if marker and marker == scenario.get('auth_probe_marker'):
@@ -69,6 +86,9 @@ if step == 'sleep':
     time.sleep(60)
 if step == 'auth':
     print('401 authentication failed', file=sys.stderr)
+    sys.exit(1)
+if step == 'secret_failure':
+    print(os.environ.get('COPILOT_GITHUB_TOKEN', ''), file=sys.stderr)
     sys.exit(1)
 if step == 'oauth':
     print('Failed to authenticate: OAuth session expired and could not be refreshed', file=sys.stderr)

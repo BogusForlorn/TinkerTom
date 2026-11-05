@@ -24,6 +24,7 @@ from .storage import atomic_write
 _COPILOT_TOKEN_MAX_BYTES = 16 * 1024
 _COPILOT_ZSH_TIMEOUT = 2
 _COPILOT_REMOTE_PROBE_TIMEOUT = 2
+_COPILOT_REMOTE_HELP_MAX_BYTES = 16 * 1024
 _CLAUDE_AUTH_PROBE_TIMEOUT = 3
 _CLAUDE_AUTH_MAX_BYTES = 16 * 1024
 
@@ -36,6 +37,67 @@ def _usable_copilot_token(value):
             or len(value.encode()) > _COPILOT_TOKEN_MAX_BYTES):
         return None
     return value
+
+
+def _copilot_token_class(value):
+    """Classify a Copilot token without exposing any token-derived detail."""
+    token = _usable_copilot_token(value)
+    if token is None:
+        return "missing"
+    if token.startswith("github_pat_"):
+        return "fine_grained"
+    if token.startswith("ghp_"):
+        return "classic_unsupported"
+    return "other"
+
+
+def _redact_copilot_token(value, token):
+    """Defensively remove the dedicated token from serialized diagnostics."""
+    if not isinstance(value, str) or not isinstance(token, str) or not token:
+        return value
+    return value.replace(token, "[REDACTED_COPILOT_TOKEN]")
+
+
+def _redact_copilot_log(path, token):
+    """Remove an echoed dedicated token from the fallback's persisted logs."""
+    if not isinstance(token, str) or not token:
+        return
+    try:
+        data = path.read_bytes()
+        redacted = data.replace(token.encode(), b"[REDACTED_COPILOT_TOKEN]")
+        if redacted != data:
+            path.write_bytes(redacted)
+    except OSError:
+        pass
+
+
+def _copilot_failure_category(message):
+    """Conservatively classify the actual Copilot CLI failure text."""
+    text = (message or "").lower()
+    if any(marker in text for marker in (
+            "--no-remote was removed", "--no-remote-export was removed")):
+        return "option_parse"
+    if any(marker in text for marker in (
+            "unknown option", "unknown argument", "unrecognized option", "unrecognized argument",
+            "unexpected option", "unexpected argument", "invalid option", "invalid argument",
+            "option parse", "usage:")):
+        return "option_parse"
+    if any(marker in text for marker in (
+            "unauthorized", "unauthenticated", "authentication failed", "invalid token",
+            "invalid api key", "not logged in", "please log in", "401")):
+        return "authentication"
+    if any(marker in text for marker in (
+            "not entitled", "entitlement", "license required", "subscription required",
+            "access denied", "forbidden", "403")):
+        return "entitlement"
+    if any(marker in text for marker in (
+            "model not found", "model unsupported", "unsupported model", "model unavailable",
+            "model is unavailable")):
+        return "model"
+    if any(marker in text for marker in (
+            "rate limit", "rate_limit", "too many requests", "429", "usage limit")):
+        return "rate_limit"
+    return "other"
 
 
 def _recover_copilot_token(env):
@@ -88,16 +150,44 @@ def _copilot_remote_flags(executable, env):
     """Return legacy remote-disable flags only when this CLI accepts them."""
     proc = None
     try:
-        proc = subprocess.Popen(
-            [executable, "--no-remote", "--no-remote-export", "--version"],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env=env, start_new_session=True)
-        try:
-            return ("--no-remote", "--no-remote-export") if proc.wait(
-                timeout=_COPILOT_REMOTE_PROBE_TIMEOUT) == 0 else ()
-        except subprocess.TimeoutExpired:
-            _kill_process(proc)
-            return ()
+        with tempfile.TemporaryDirectory(prefix="tt-copilot-help-") as temp:
+            stdout_path, stderr_path = Path(temp) / "stdout", Path(temp) / "stderr"
+            with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+                proc = subprocess.Popen(
+                    [executable, "--help"], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                    env=env, start_new_session=True)
+                deadline = time.monotonic() + _COPILOT_REMOTE_PROBE_TIMEOUT
+                while proc.poll() is None:
+                    if (stdout_path.stat().st_size > _COPILOT_REMOTE_HELP_MAX_BYTES or
+                            stderr_path.stat().st_size > _COPILOT_REMOTE_HELP_MAX_BYTES):
+                        _kill_process(proc)
+                        return ()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _kill_process(proc)
+                        return ()
+                    try:
+                        proc.wait(timeout=min(.02, remaining))
+                    except subprocess.TimeoutExpired:
+                        continue
+            if proc.returncode != 0:
+                return ()
+            if (stdout_path.stat().st_size > _COPILOT_REMOTE_HELP_MAX_BYTES or
+                    stderr_path.stat().st_size > _COPILOT_REMOTE_HELP_MAX_BYTES):
+                return ()
+            try:
+                help_text = (stdout_path.read_bytes() + stderr_path.read_bytes()).decode("utf-8")
+            except (OSError, UnicodeDecodeError):
+                return ()
+            documented = set()
+            for line in help_text.splitlines():
+                tokens = line.strip().split()
+                if not tokens or not tokens[0].startswith("-"):
+                    continue
+                documented.update(token for token in tokens if token in ("--no-remote", "--no-remote-export"))
+            return ("--no-remote", "--no-remote-export") if documented == {
+                "--no-remote", "--no-remote-export"
+            } else ()
     except (OSError, subprocess.TimeoutExpired):
         _kill_process(proc)
         return ()
@@ -432,8 +522,11 @@ def agent_call(kind, args, workspace: Path):
                             cwd=Path(isolated), prompt=complete_review_prompt,
                             log_dir=directory / "copilot-attempt", timeout=config.agent_timeout_seconds,
                             env=fallback_env, stopped=lambda: stop[0], provider="copilot")
+                    _redact_copilot_log(directory / "copilot-attempt" / "stdout.log", resolved_token)
+                    _redact_copilot_log(directory / "copilot-attempt" / "stderr.log", resolved_token)
                     actual_provider, actual_model = "copilot", config.copilot_fallback_model
                     if fallback.success and fallback.final_text.strip():
+                        fallback_text = _redact_copilot_token(fallback.final_text, resolved_token)
                         request.update(actual_provider=actual_provider, actual_model=actual_model,
                                        primary_failure=primary_failure, **auth_fields(primary_auth_diagnostic))
                         atomic_write(directory / "request.json", json.dumps(request, indent=2))
@@ -445,7 +538,7 @@ def agent_call(kind, args, workspace: Path):
                                   "actual_provider": actual_provider, "actual_model": actual_model,
                                   "primary_failure": primary_failure, "status": "reviewed",
                                   **auth_fields(primary_auth_diagnostic),
-                                  "report": fallback.final_text[-16000:], "log_dir": str(directory),
+                                  "report": fallback_text[-16000:], "log_dir": str(directory),
                                   "cached": False, "usage": state["usage"],
                                   "note": "Copilot fallback review; coordinator must verify findings."}
                         atomic_write(result_path, json.dumps(result, indent=2))
@@ -455,22 +548,34 @@ def agent_call(kind, args, workspace: Path):
                              next_run_at=0)
                         return json.dumps(result), False
                     fallback_failure = (fallback.error or "Copilot returned no review text").strip()
-                reason = f"Primary Claude failed: {primary_failure}; Copilot fallback failed: {fallback_failure}"
+                fallback_failure = _redact_copilot_token(fallback_failure, resolved_token)[-12000:]
+                fallback_diagnostic = {
+                    "category": _copilot_failure_category(fallback_failure),
+                    "token_class": _copilot_token_class(resolved_token),
+                }
+                safe_primary_failure = _redact_copilot_token(primary_failure, resolved_token)
+                reason = f"Primary Claude failed: {safe_primary_failure}; Copilot fallback failed: {fallback_failure}"
                 request.update(actual_provider=actual_provider, actual_model=actual_model,
-                               primary_failure=primary_failure, fallback_failure=fallback_failure,
+                               fallback_diagnostic=fallback_diagnostic,
+                               primary_failure=safe_primary_failure,
+                               fallback_failure=fallback_failure,
                                **auth_fields(primary_auth_diagnostic))
                 atomic_write(directory / "request.json", json.dumps(request, indent=2))
                 result = {"provider": actual_provider, "profile": profile, "model": actual_model,
                           "requested_primary_provider": provider, "requested_primary_model": model,
                           "actual_provider": actual_provider, "actual_model": actual_model,
-                          "primary_failure": primary_failure, "fallback_failure": fallback_failure,
+                          "fallback_diagnostic": fallback_diagnostic,
+                          "primary_failure": safe_primary_failure,
+                          "fallback_failure": fallback_failure,
                           **auth_fields(primary_auth_diagnostic),
                           "status": "blocked", "reason": reason, "log_dir": str(directory),
                           "cached": False, "usage": state["usage"]}
                 atomic_write(result_path, json.dumps(result, indent=2))
                 save(status="blocked", provider=actual_provider, model=actual_model,
                      actual_provider=actual_provider, actual_model=actual_model,
-                     primary_failure=primary_failure, fallback_failure=fallback_failure,
+                     fallback_diagnostic=fallback_diagnostic,
+                     primary_failure=safe_primary_failure,
+                     fallback_failure=fallback_failure,
                      **auth_fields(primary_auth_diagnostic), reason=reason,
                      next_run_at=0)
                 return json.dumps(result), True

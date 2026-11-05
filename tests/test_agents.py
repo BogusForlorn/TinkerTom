@@ -10,7 +10,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from tinkertom.agents import active_config, agent_call, git_snapshot, git_snapshot_changed, helper_command, helpers_waiting
+from tinkertom.agents import (_copilot_failure_category, _copilot_token_class,
+                              _copilot_remote_flags, _redact_copilot_token, active_config, agent_call, git_snapshot,
+                              git_snapshot_changed, helper_command, helpers_waiting)
 from tinkertom.beads import beads_call
 from tinkertom.config import Config
 from tinkertom.mcp import available_tools, response
@@ -51,6 +53,47 @@ class HelperTests(unittest.TestCase):
 
     def calls(self):
         return [json.loads(x) for x in (self.workspace / 'calls.jsonl').read_text().splitlines()]
+
+    def test_copilot_diagnostics_are_safe_and_ordered(self):
+        token = 'github_pat_sensitive-value'
+        self.assertEqual(_copilot_token_class(None), 'missing')
+        self.assertEqual(_copilot_token_class('ghp_classic'), 'classic_unsupported')
+        self.assertEqual(_copilot_token_class(token), 'fine_grained')
+        self.assertEqual(_copilot_token_class('other-token'), 'other')
+        self.assertEqual(_redact_copilot_token('echo ' + token, token),
+                         'echo [REDACTED_COPILOT_TOKEN]')
+        for text, category in {
+            'unknown option --model': 'option_parse',
+            'error: --no-remote was removed. Use /remote off in a session; see /help for more information.':
+                'option_parse',
+            'remote option was removed': 'other',
+            '401 authentication failed': 'authentication',
+            'not entitled to use Copilot': 'entitlement',
+            'model not found': 'model',
+            '429 too many requests': 'rate_limit',
+            'unexpected failure': 'other',
+        }.items():
+            self.assertEqual(_copilot_failure_category(text), category)
+
+        self.scenario(['auth', 'auth'])
+        value, error = agent_call('rubber_duck', {'proposal': 'Review diagnostic ordering'}, self.workspace)
+        self.assertTrue(error)
+        result = json.loads(value)
+        self.assertEqual(result['fallback_diagnostic'], {
+            'category': 'authentication', 'token_class': 'other'})
+        self.assertLess(value.index('fallback_diagnostic'), value.index('primary_failure'))
+        self.assertIn('401 authentication failed', result['fallback_failure'])
+
+    def test_copilot_remote_probe_requires_both_help_options(self):
+        for help_mode, expected in (('both', ('--no-remote', '--no-remote-export')),
+                                    ('neither', ()), ('prose', ()), ('failure', ()), ('oversized', ())):
+            with self.subTest(help_mode=help_mode):
+                self.scenario(['review'], help=help_mode)
+                self.assertEqual(_copilot_remote_flags(str(self.bin / 'copilot'), self.env), expected)
+
+        self.scenario(['review'], help='timeout')
+        with patch('tinkertom.agents._COPILOT_REMOTE_PROBE_TIMEOUT', .01):
+            self.assertEqual(_copilot_remote_flags(str(self.bin / 'copilot'), self.env), ())
 
     def test_opposite_routing_readonly_and_review_cache_tracks_evidence(self):
         for parent, other, model in [('codex', 'claude', 'opus'), ('claude', 'codex', 'gpt-5.6-sol')]:
@@ -345,6 +388,16 @@ class HelperTests(unittest.TestCase):
         self.assertIn('401 authentication failed', result['fallback_failure'])
         self.assertIn('Primary Claude failed:', result['reason'])
         self.assertIn('Copilot fallback failed:', result['reason'])
+
+    def test_blocked_fallback_redacts_copilot_token_from_result_and_logs(self):
+        token = 'copilot-only-token'
+        self.scenario(['auth', 'secret_failure'], help='neither')
+        value, error = agent_call('rubber_duck', {'proposal': 'Review blocked fallback'}, self.workspace)
+        self.assertTrue(error)
+        persisted = '\n'.join(path.read_text(errors='replace') for path in
+                              (self.workspace / '.tinkertom/agents').rglob('*') if path.is_file())
+        self.assertNotIn(token, value)
+        self.assertNotIn(token, persisted)
 
     def test_fallback_requires_dedicated_copilot_token(self):
         self.scenario(['auth', 'review'])

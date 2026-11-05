@@ -113,6 +113,11 @@ class ProviderTests(unittest.TestCase):
                 out.failure(text, 1000)
                 self.assertEqual(out.error_kind, kind)
 
+    def test_unexpected_cli_arguments_are_not_authentication(self):
+        out = Outcome()
+        out.failure("unknown option --model", 1000)
+        self.assertNotEqual(out.error_kind, "fatal")
+
     def test_terminal_generic_failure_preserves_specific_error(self):
         events = Events("codex", lambda: 1000)
         events.feed('{"type":"error","message":"401 authentication failed"}')
