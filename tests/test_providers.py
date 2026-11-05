@@ -4,10 +4,21 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from tinkertom.config import Config
-from tinkertom.providers import Events, Outcome, command, parse_report, reset_time
+from tinkertom.providers import Events, Outcome, command, copilot_command, parse_report, reset_time
 
 
 class ProviderTests(unittest.TestCase):
+    def test_copilot_command_keeps_isolation_and_selects_remote_flags(self):
+        stable = copilot_command('/bin/copilot', 'reviewer')
+        for flag in ('--silent', '--reasoning-effort', 'high', '--available-tools',
+                     '--disable-builtin-mcps', '--no-custom-instructions', '--no-ask-user',
+                     '--no-auto-update', '--output-format', 'text'):
+            self.assertIn(flag, stable)
+        self.assertNotIn('--no-remote', stable)
+        supported = copilot_command('/bin/copilot', 'reviewer', ('--no-remote', '--no-remote-export'))
+        self.assertIn('--no-remote', supported)
+        self.assertIn('--no-remote-export', supported)
+
     def test_codex_resume_uses_exact_session_and_supported_flags(self):
         args = command(Config(), "specific-id")
         self.assertEqual(args[:3], ["codex", "exec", "resume"])

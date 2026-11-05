@@ -209,10 +209,71 @@ class HelperTests(unittest.TestCase):
                 self.assertIn('Review fallback boundaries ' + failure, fallback['prompt'])
                 self.assertIn('The caller supplied fallback context.', fallback['prompt'])
                 self.assertIn('important_snapshot = True', fallback['prompt'])
+                if failure == 'http503':
+                    self.assertNotIn('primary_auth_diagnostic', result)
+                    self.assertNotIn('primary_auth_note', result)
                 directory = Path(result['log_dir'])
                 request = json.loads((directory / 'request.json').read_text())
                 state = json.loads((directory / 'state.json').read_text())
                 self.assertEqual((request['actual_provider'], state['actual_provider']), ('copilot', 'copilot'))
+
+    def test_fallback_probes_remote_capability_and_sanitizes_claude_auth_status(self):
+        source = self.workspace / 'evidence.py'
+        source.write_text('evidence = True\n')
+        for remote_supported, auth_status in ((True, 'true'), (False, 'false'), (True, 'secret'),
+                                              (True, 'invalid'), (True, 'oversized'), (True, 'timeout')):
+            with self.subTest(remote_supported=remote_supported, auth_status=auth_status):
+                self.scenario(['auth', 'review'], remote_supported=remote_supported, auth_status=auth_status)
+                timeout_patch = patch('tinkertom.agents._CLAUDE_AUTH_PROBE_TIMEOUT', .01) \
+                    if auth_status == 'timeout' else nullcontext()
+                with timeout_patch:
+                    value, error = agent_call('rubber_duck', {
+                        'proposal': 'Probe fallback safely', 'files': ['evidence.py'], 'force': True}, self.workspace)
+                self.assertFalse(error, value)
+                result = json.loads(value)
+                diagnostic = result['primary_auth_diagnostic']
+                if auth_status in ('true', 'secret'):
+                    self.assertEqual(diagnostic['helper_logged_in'], True)
+                    self.assertIn('credential-store/Keychain', result['primary_auth_note'])
+                elif auth_status == 'false':
+                    self.assertEqual(diagnostic['helper_logged_in'], False)
+                    self.assertIn('not logged in', result['primary_auth_note'])
+                else:
+                    self.assertEqual(diagnostic['status'], 'unavailable')
+                self.assertNotIn('sentinel@example.test', value)
+                self.assertNotIn('sentinel-org', value)
+                self.assertNotIn('/sentinel/token', value)
+                persisted = '\n'.join(path.read_text(errors='replace') for path in
+                                      (self.workspace / '.tinkertom/agents').rglob('*') if path.is_file())
+                self.assertNotIn('sentinel@example.test', persisted)
+                self.assertNotIn('sentinel-org', persisted)
+                self.assertNotIn('/sentinel/token', persisted)
+                self.assertNotIn('stderr-sentinel@example.test', value)
+                self.assertNotIn('stderr-sentinel-org', value)
+                self.assertNotIn('/stderr-sentinel/token', value)
+                self.assertNotIn('stderr-sentinel@example.test', persisted)
+                self.assertNotIn('stderr-sentinel-org', persisted)
+                self.assertNotIn('/stderr-sentinel/token', persisted)
+                fallback = self.calls()[-1]
+                self.assertEqual(fallback['provider'], 'copilot')
+                if remote_supported:
+                    self.assertIn('--no-remote', fallback['argv'])
+                    self.assertIn('--no-remote-export', fallback['argv'])
+                else:
+                    self.assertNotIn('--no-remote', fallback['argv'])
+                    self.assertNotIn('--no-remote-export', fallback['argv'])
+
+    def test_claude_auth_probe_receives_exact_helper_environment(self):
+        self.scenario(['auth', 'review'], auth_status='true', auth_probe_marker='probe-only-marker')
+        with patch.dict(os.environ, {'TT_AUTH_PROBE_MARKER': 'probe-only-marker'}):
+            value, error = agent_call('rubber_duck', {'proposal': 'Probe helper environment', 'force': True},
+                                      self.workspace)
+        self.assertFalse(error, value)
+        self.assertTrue((self.workspace / 'auth_probe_marker_seen').exists())
+        self.assertNotIn('probe-only-marker', value)
+        persisted = '\n'.join(path.read_text(errors='replace') for path in
+                              (self.workspace / '.tinkertom/agents').rglob('*') if path.is_file())
+        self.assertNotIn('probe-only-marker', persisted)
 
     def test_missing_claude_persists_primary_request_then_falls_back(self):
         self.scenario(['review'])
@@ -223,6 +284,8 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(error, value)
         self.assertEqual(result['actual_provider'], 'copilot')
         self.assertIn('CLI is missing', result['primary_failure'])
+        self.assertNotIn('primary_auth_diagnostic', result)
+        self.assertNotIn('primary_auth_note', result)
         self.assertEqual([call['provider'] for call in self.calls()], ['copilot'])
         directory = Path(result['log_dir'])
         self.assertTrue((directory / 'request.json').exists())

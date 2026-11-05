@@ -9,6 +9,32 @@ root = Path(os.environ['TT_FIXTURE_ROOT'])
 provider = Path(sys.argv[0]).name
 scenario = json.loads((root / 'scenario.json').read_text())
 calls = root / 'calls.jsonl'
+
+# Capability/auth probes are deliberately not review calls.
+if '--version' in sys.argv[1:]:
+    sys.exit(0 if scenario.get('remote_supported', True) else 2)
+if sys.argv[1:] == ['auth', 'status']:
+    marker = os.environ.get('TT_AUTH_PROBE_MARKER')
+    if marker and marker == scenario.get('auth_probe_marker'):
+        (root / 'auth_probe_marker_seen').write_text('seen\n')
+    outcome = scenario.get('auth_status', 'invalid')
+    if outcome == 'timeout':
+        time.sleep(60)
+    if outcome == 'true':
+        print(json.dumps({'loggedIn': True}), flush=True)
+    elif outcome == 'false':
+        print(json.dumps({'loggedIn': False}), flush=True)
+    elif outcome == 'secret':
+        print(json.dumps({'loggedIn': True, 'email': 'sentinel@example.test',
+                          'org': 'sentinel-org', 'path': '/sentinel/token'}), flush=True)
+        print('stderr-sentinel@example.test stderr-sentinel-org /stderr-sentinel/token', file=sys.stderr,
+              flush=True)
+    elif outcome == 'oversized':
+        print('x' * 17000, flush=True)
+        time.sleep(.2)
+    else:
+        print('not-json', flush=True)
+    sys.exit(0)
 count = len(calls.read_text().splitlines()) if calls.exists() else 0
 prompt = sys.stdin.read()
 with calls.open('a') as out:

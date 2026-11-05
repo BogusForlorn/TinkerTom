@@ -43,13 +43,13 @@ def command(config: Config, session_id: str | None) -> list[str]:
     return argv
 
 
-def copilot_command(executable: str, model: str) -> list[str]:
+def copilot_command(executable: str, model: str, remote_flags=()) -> list[str]:
     """One-shot, text-only, tool-less Copilot review invocation."""
     # With -p present Copilot ignores piped stdin, so prompt mode is selected
     # by the non-TTY stdin itself instead of passing a literal "-" prompt.
     return [executable, "--silent", "--model", model, "--reasoning-effort", "high",
             "--available-tools", "", "--disable-builtin-mcps", "--no-custom-instructions",
-            "--no-ask-user", "--no-auto-update", "--no-remote", "--no-remote-export",
+            "--no-ask-user", "--no-auto-update", *remote_flags,
             "--output-format", "text"]
 
 

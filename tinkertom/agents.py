@@ -23,6 +23,9 @@ from .storage import atomic_write
 
 _COPILOT_TOKEN_MAX_BYTES = 16 * 1024
 _COPILOT_ZSH_TIMEOUT = 2
+_COPILOT_REMOTE_PROBE_TIMEOUT = 2
+_CLAUDE_AUTH_PROBE_TIMEOUT = 3
+_CLAUDE_AUTH_MAX_BYTES = 16 * 1024
 
 
 def _usable_copilot_token(value):
@@ -64,6 +67,91 @@ def _recover_copilot_token(env):
     except UnicodeDecodeError:
         return None
     return _usable_copilot_token(token)
+
+
+def _kill_process(proc):
+    if proc is not None and proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def _copilot_remote_flags(executable, env):
+    """Return legacy remote-disable flags only when this CLI accepts them."""
+    proc = None
+    try:
+        proc = subprocess.Popen(
+            [executable, "--no-remote", "--no-remote-export", "--version"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env=env, start_new_session=True)
+        try:
+            return ("--no-remote", "--no-remote-export") if proc.wait(
+                timeout=_COPILOT_REMOTE_PROBE_TIMEOUT) == 0 else ()
+        except subprocess.TimeoutExpired:
+            _kill_process(proc)
+            return ()
+    except (OSError, subprocess.TimeoutExpired):
+        _kill_process(proc)
+        return ()
+
+
+def _claude_login_failure(message):
+    lowered = (message or "").lower()
+    return any(token in lowered for token in (
+        "not logged in", "/login", "unauthenticated", "oauth", "401",
+        "authentication failed", "auth failed", "refresh failure", "could not be refreshed"))
+
+
+def _claude_auth_diagnostic(executable, env):
+    """Return only safe login status fields from the helper's exact environment."""
+    env_bits = {
+        "claude_config_dir_set": bool(env.get("CLAUDE_CONFIG_DIR")),
+        "anthropic_env_set": bool(env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN")),
+    }
+    proc = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="tt-auth-") as temp:
+            output = Path(temp) / "status.json"
+            with output.open("wb") as stream:
+                proc = subprocess.Popen(
+                    [executable, "auth", "status"], stdin=subprocess.DEVNULL, stdout=stream,
+                    stderr=subprocess.DEVNULL, env=env, start_new_session=True)
+                deadline = time.monotonic() + _CLAUDE_AUTH_PROBE_TIMEOUT
+                while proc.poll() is None:
+                    try:
+                        if output.stat().st_size > _CLAUDE_AUTH_MAX_BYTES:
+                            _kill_process(proc)
+                            return {"status": "unavailable", **env_bits}
+                    except OSError:
+                        pass
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        _kill_process(proc)
+                        return {"status": "unavailable", **env_bits}
+                    try:
+                        proc.wait(timeout=min(.02, remaining))
+                    except subprocess.TimeoutExpired:
+                        continue
+            if proc.returncode != 0 or output.stat().st_size > _CLAUDE_AUTH_MAX_BYTES:
+                return {"status": "unavailable", **env_bits}
+            try:
+                data = json.loads(output.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                return {"status": "unavailable", **env_bits}
+        if not isinstance(data, dict) or type(data.get("loggedIn")) is not bool:
+            return {"status": "unavailable", **env_bits}
+        return {"status": "available", "helper_logged_in": data["loggedIn"], **env_bits}
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        _kill_process(proc)
+        return {"status": "unavailable", **env_bits}
 
 
 def git_snapshot(workspace):
@@ -159,8 +247,8 @@ def helper_command(config, session, review, directory, workspace):
     return argv
 
 
-def copilot_fallback_command(executable, model):
-    return copilot_command(executable, model)
+def copilot_fallback_command(executable, model, remote_flags=()):
+    return copilot_command(executable, model, remote_flags)
 
 
 def eligible_copilot_fallback(outcome):
@@ -298,7 +386,22 @@ def agent_call(kind, args, workspace: Path):
                 state.update(fields)
                 atomic_write(directory / "state.json", json.dumps(state, indent=2))
 
-            def copilot_fallback(primary_failure):
+            def auth_note(diagnostic):
+                if diagnostic.get("status") != "available":
+                    return "Claude login status could not be verified in the helper environment."
+                if diagnostic.get("helper_logged_in"):
+                    return ("The same helper environment reports Claude is logged in; the failure may involve "
+                            "credential-store/Keychain, sandbox, or invocation access.")
+                return ("Claude is not logged in in the helper environment, even if an interactive shell "
+                        "differs.")
+
+            def auth_fields(diagnostic):
+                if diagnostic is None:
+                    return {}
+                return {"primary_auth_diagnostic": diagnostic,
+                        "primary_auth_note": auth_note(diagnostic)}
+
+            def copilot_fallback(primary_failure, primary_auth_diagnostic=None):
                 """Run at most one isolated fallback and always return a terminal result."""
                 copilot = shutil.which("copilot", path=env["PATH"])
                 resolved_token = copilot_github_token
@@ -322,16 +425,17 @@ def agent_call(kind, args, workspace: Path):
                                 "CLAUDE_PID", "CODEX_THREAD_ID"):
                         fallback_env.pop(key, None)
                     fallback_env["TINKERTOM_PROVIDER"] = "copilot"
+                    remote_flags = _copilot_remote_flags(copilot, fallback_env)
                     with tempfile.TemporaryDirectory(prefix="tt-copilot-") as isolated:
                         fallback = run_process(
-                            copilot_fallback_command(copilot, config.copilot_fallback_model),
+                            copilot_fallback_command(copilot, config.copilot_fallback_model, remote_flags),
                             cwd=Path(isolated), prompt=complete_review_prompt,
                             log_dir=directory / "copilot-attempt", timeout=config.agent_timeout_seconds,
                             env=fallback_env, stopped=lambda: stop[0], provider="copilot")
                     actual_provider, actual_model = "copilot", config.copilot_fallback_model
                     if fallback.success and fallback.final_text.strip():
                         request.update(actual_provider=actual_provider, actual_model=actual_model,
-                                       primary_failure=primary_failure)
+                                       primary_failure=primary_failure, **auth_fields(primary_auth_diagnostic))
                         atomic_write(directory / "request.json", json.dumps(request, indent=2))
                         for key, value in fallback.usage.items():
                             if type(value) in (int, float):
@@ -340,29 +444,34 @@ def agent_call(kind, args, workspace: Path):
                                   "requested_primary_provider": provider, "requested_primary_model": model,
                                   "actual_provider": actual_provider, "actual_model": actual_model,
                                   "primary_failure": primary_failure, "status": "reviewed",
+                                  **auth_fields(primary_auth_diagnostic),
                                   "report": fallback.final_text[-16000:], "log_dir": str(directory),
                                   "cached": False, "usage": state["usage"],
                                   "note": "Copilot fallback review; coordinator must verify findings."}
                         atomic_write(result_path, json.dumps(result, indent=2))
                         save(status="reviewed", provider=actual_provider, model=actual_model,
                              actual_provider=actual_provider, actual_model=actual_model,
-                             primary_failure=primary_failure, next_run_at=0)
+                             primary_failure=primary_failure, **auth_fields(primary_auth_diagnostic),
+                             next_run_at=0)
                         return json.dumps(result), False
                     fallback_failure = (fallback.error or "Copilot returned no review text").strip()
                 reason = f"Primary Claude failed: {primary_failure}; Copilot fallback failed: {fallback_failure}"
                 request.update(actual_provider=actual_provider, actual_model=actual_model,
-                               primary_failure=primary_failure, fallback_failure=fallback_failure)
+                               primary_failure=primary_failure, fallback_failure=fallback_failure,
+                               **auth_fields(primary_auth_diagnostic))
                 atomic_write(directory / "request.json", json.dumps(request, indent=2))
                 result = {"provider": actual_provider, "profile": profile, "model": actual_model,
                           "requested_primary_provider": provider, "requested_primary_model": model,
                           "actual_provider": actual_provider, "actual_model": actual_model,
                           "primary_failure": primary_failure, "fallback_failure": fallback_failure,
+                          **auth_fields(primary_auth_diagnostic),
                           "status": "blocked", "reason": reason, "log_dir": str(directory),
                           "cached": False, "usage": state["usage"]}
                 atomic_write(result_path, json.dumps(result, indent=2))
                 save(status="blocked", provider=actual_provider, model=actual_model,
                      actual_provider=actual_provider, actual_model=actual_model,
-                     primary_failure=primary_failure, fallback_failure=fallback_failure, reason=reason,
+                     primary_failure=primary_failure, fallback_failure=fallback_failure,
+                     **auth_fields(primary_auth_diagnostic), reason=reason,
                      next_run_at=0)
                 return json.dumps(result), True
 
@@ -419,7 +528,12 @@ def agent_call(kind, args, workspace: Path):
                     if stop[0] or outcome.interrupted:
                         break
                     if fallback_allowed and eligible_copilot_fallback(outcome):
-                        return copilot_fallback(outcome.error or "Claude CLI failed")
+                        primary_failure = outcome.error or "Claude CLI failed"
+                        # Eligibility is decided before and independently of this diagnostic.
+                        diagnostic = None
+                        if _claude_login_failure(primary_failure):
+                            diagnostic = _claude_auth_diagnostic(child.executable, env)
+                        return copilot_fallback(primary_failure, diagnostic)
                     if outcome.error_kind == "rate_limit":
                         save(status="waiting", next_run_at=(outcome.reset_at or time.time() + config.cooldown_seconds) + config.reset_buffer_seconds)
                         continue
